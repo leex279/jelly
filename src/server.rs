@@ -1082,7 +1082,7 @@ fn now_ms() -> u64 {
 
 /// A browser the daemon can drive headless: JELLY_CHROME, or the usual installs.
 fn chrome() -> Option<String> {
-    let candidates = [
+    let mut candidates = vec![
         std::env::var("JELLY_CHROME").unwrap_or_default(),
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
         "/Applications/Chromium.app/Contents/MacOS/Chromium".into(),
@@ -1092,6 +1092,19 @@ fn chrome() -> Option<String> {
         "/usr/bin/chromium".into(),
         "/usr/bin/chromium-browser".into(),
     ];
+    // Windows installs go under one of the program folders, which the environment names.
+    for (folder, install) in [
+        ("ProgramFiles", r"Google\Chrome\Application\chrome.exe"),
+        ("ProgramFiles(x86)", r"Google\Chrome\Application\chrome.exe"),
+        ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
+        ("LOCALAPPDATA", r"Chromium\Application\chrome.exe"),
+        ("ProgramFiles(x86)", r"Microsoft\Edge\Application\msedge.exe"),
+        ("ProgramFiles", r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ] {
+        if let Some(root) = std::env::var_os(folder) {
+            candidates.push(std::path::Path::new(&root).join(install).to_string_lossy().into_owned());
+        }
+    }
     candidates.into_iter().find(|c| !c.is_empty() && std::path::Path::new(c).exists())
 }
 
@@ -1119,9 +1132,15 @@ async fn run_browser(bin: &str, port: u16, name: &str, width: u32, height: u32, 
     let profile = std::env::temp_dir().join("jelly-chrome");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--mute-audio"])
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("--virtual-time-budget=2500")
+        .arg(format!("--user-data-dir={}", profile.display()));
+    if cfg!(windows) {
+        // On Windows `--window-size` is the outer size, so the page comes out narrower than
+        // asked and its snapshot is refused; a fullscreen window on a screen of that size is exact.
+        cmd.arg(format!("--screen-info={{{width}x{height}}}")).arg("--start-fullscreen");
+    } else {
+        cmd.arg(format!("--window-size={width},{height}"));
+    }
+    cmd.arg("--virtual-time-budget=2500")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
