@@ -2131,7 +2131,7 @@ mod tests {
         }
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("note.txt"), b"SECRET-OUTSIDE").unwrap();
-        for dir in [home.path().join("beside"), home.path().join("assets/test:missing")] {
+        for dir in [home.path().join("beside"), home.path().join("assets").join(crate::disk::name("test:missing"))] {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("note.txt"), b"SECRET-OUTSIDE").unwrap();
         }

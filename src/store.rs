@@ -588,7 +588,8 @@ impl Store {
                 let entry = serde_json::from_slice::<Entry>(&bytes).map_err(|e| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
                 })?;
-                // The name becomes a path under `assets/`, so a hand-edited one must not escape the home.
+                // The name becomes a file under `jellies/` and a folder under `assets/` (see
+                // `disk::name`), so a hand-edited one must not escape the home.
                 valid_name(&entry.jelly.name).map_err(|e| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))
                 })?;
@@ -838,7 +839,7 @@ impl Store {
     }
 
     pub fn asset_dir(&self, name: &str) -> PathBuf {
-        self.dir.join("assets").join(name)
+        self.dir.join("assets").join(crate::disk::name(name))
     }
 
     /// Saves a file next to a jelly, outside its state and undo history.
@@ -1078,7 +1079,9 @@ impl Store {
 
     fn log(&mut self, ev: &Event) -> Result<(), Error> {
         let append = || -> std::io::Result<(u64, usize)> {
-            let mut file = fs::OpenOptions::new().create(true).read(true).append(true).open(self.events_path())?;
+            // Opened for write, not append: Windows denies `set_len` on an append-only handle,
+            // and that is how a failed append is rolled back below.
+            let mut file = fs::OpenOptions::new().create(true).truncate(false).read(true).write(true).open(self.events_path())?;
             let len = file.metadata()?.len();
             if len > 0 {
                 file.seek(SeekFrom::End(-1))?;
@@ -1088,6 +1091,7 @@ impl Store {
                     return Err(std::io::Error::other("incomplete event history; repair events.jsonl before retrying"));
                 }
             }
+            file.seek(SeekFrom::End(0))?;
             let mut line = serde_json::to_vec(ev).expect("an event serializes");
             line.push(b'\n');
             #[cfg(test)]
@@ -1262,7 +1266,7 @@ impl Store {
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir.join("jellies").join(format!("{name}.json"))
+        self.dir.join("jellies").join(format!("{}.json", crate::disk::name(name)))
     }
 }
 
@@ -1455,7 +1459,15 @@ fn valid_name(name: &str) -> Result<(), Error> {
 fn valid_file(file: &str) -> Result<(), Error> {
     let ok = !file.is_empty() && file.len() <= 128 && !file.starts_with('.')
         && file.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
-    if ok { Ok(()) } else { Err(Error::Invalid(format!("bad file name {file:?}: use letters, digits, '.', '-' and '_'"))) }
+    if !ok { return Err(Error::Invalid(format!("bad file name {file:?}: use letters, digits, '.', '-' and '_'"))); }
+    // Windows treats these stems as devices whatever the extension: `NUL` reports success and keeps nothing.
+    let stem = file.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+    if cfg!(windows) && device {
+        return Err(Error::Invalid(format!("bad file name {file:?}: {stem} is a reserved name on Windows")));
+    }
+    Ok(())
 }
 
 impl Jelly {
@@ -2016,6 +2028,19 @@ mod tests {
     }
 
     #[test]
+    fn asset_names_reject_windows_device_names() {
+        let (_d, mut s) = store();
+        s.create("plan", "".into(), VERBS.into(), json!({}), "agent", false, "", "").unwrap();
+        for device in ["NUL", "con.txt", "COM1", "lpt9.png"] {
+            let saved = s.put_asset("plan", device, b"x", "agent");
+            assert_eq!(saved.is_err(), cfg!(windows), "{device}: {saved:?}");
+        }
+        for ordinary in ["console.txt", "nul-report.md", "COM10", "lpt0.txt"] {
+            s.put_asset("plan", ordinary, b"x", "agent").unwrap_or_else(|e| panic!("{ordinary}: {e}"));
+        }
+    }
+
+    #[test]
     fn attention_items_are_answered_beside_state() {
         let (_d, mut s) = store();
         s.create("j", "".into(), VERBS.into(), json!({"labels": {}}), "agent", false, "", "").unwrap();
@@ -2312,9 +2337,9 @@ mod tests {
             let (dir, mut s) = store();
             s.create("valid", "".into(), VERBS.into(), json!({}), "agent", false, "", "").unwrap();
             drop(s);
-            let broken = dir.path().join("jellies/broken.json");
+            let broken = dir.path().join("jellies").join("broken.json");
             fs::write(&broken, contents).unwrap();
-            fs::write(dir.path().join("jellies/notes.txt"), "not a jelly").unwrap();
+            fs::write(dir.path().join("jellies").join("notes.txt"), "not a jelly").unwrap();
             let error = Store::open(dir.path()).err().expect("must not serve a partial store");
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
             assert!(error.to_string().contains(broken.to_str().unwrap()));
@@ -2333,7 +2358,7 @@ mod tests {
         let s = Store::open(dir.path()).unwrap();
         assert!(s.get("j").is_ok() && s.get("p:k").is_ok());
         drop(s);
-        let file = dir.path().join("jellies/j.json");
+        let file = dir.path().join("jellies").join("j.json");
         let original = fs::read_to_string(&file).unwrap();
         for bad in ["/tmp/outside", "../outside"] {
             let mut entry: Value = serde_json::from_str(&original).unwrap();

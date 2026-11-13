@@ -44,7 +44,8 @@ keeps its event selection and timeout behavior, detecting closure only when it
 prints a qualifying event. `serve` continues serving when stdout closes.
 
 The full guide is [`skill/SKILL.md`](skill/SKILL.md). Install it as a skill so every
-session knows it: `ln -s "$PWD/skill" ~/.claude/skills/jelly`.
+session knows it: `ln -s "$PWD/skill" ~/.claude/skills/jelly` (PowerShell:
+`New-Item -ItemType Junction -Path "$HOME\.claude\skills\jelly" -Target "$PWD\skill"`).
 
 ## For the person: install
 
@@ -55,12 +56,14 @@ jelly ls               # starts on first use: http://127.0.0.1:7878
 
 The first client command starts a detached daemon if needed, waits for it, and
 prints one startup line on stderr. Data lives in `$JELLY_HOME` or `~/.jelly`, just
-as with `jelly serve`. No login service or extra install step is needed.
+as with `jelly serve`; on Windows `~/.jelly` is `%USERPROFILE%\.jelly`. No login
+service or extra install step is needed.
 
 `jelly serve` still runs in the foreground for manual use and startup diagnostics.
 Unreadable or malformed persisted jellies prevent startup rather than serving a
 partial store. Run `jelly serve` to see the affected file and error.
-For an isolated run: `jelly serve --port 7879 --home /tmp/jelly-test`, then use
+For an isolated run: `jelly serve --port 7879 --home /tmp/jelly-test` (PowerShell:
+`--home $env:TEMP\jelly-test`), then use
 `jelly --url http://127.0.0.1:7879 ls`. On-demand startup applies only to the default
 local endpoint, including `http://localhost:7878` and equivalent URL spellings;
 other `--url` / `JELLY_URL` targets must already be running.

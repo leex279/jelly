@@ -1,6 +1,7 @@
 //! `jelly`: the daemon and the CLI agents use to make and shape jellies.
 
 mod design;
+mod disk;
 mod server;
 mod store;
 mod startup;
@@ -403,8 +404,8 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
         Cmd::Serve { port, home } => {
             let home = home
                 .or_else(|| std::env::var_os("JELLY_HOME").map(PathBuf::from))
-                .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".jelly")))
-                .ok_or("set --home, JELLY_HOME or HOME")?;
+                .or_else(|| std::env::home_dir().map(|h| h.join(".jelly")))
+                .ok_or("could not find your home directory: set --home or JELLY_HOME")?;
             let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
             rt.block_on(async {
                 // Reserve the endpoint before store initialization can write anything.

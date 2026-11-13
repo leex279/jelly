@@ -1,3 +1,7 @@
+#[path = "../src/disk.rs"]
+#[allow(dead_code)]
+mod disk;
+
 use serde_json::{json, Value};
 use std::io::Read;
 use std::net::TcpListener;
@@ -71,7 +75,7 @@ fn pull_gets_assets_from_selected_daemon_with_separate_client_homes() {
     let temp = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(&temp.path().join("daemon"));
     let client = temp.path().join("client");
-    let local_assets = client.join("assets/p:sample");
+    let local_assets = client.join("assets").join(disk::name("p:sample"));
     std::fs::create_dir_all(&local_assets).unwrap();
     std::fs::write(local_assets.join("note.txt"), b"wrong client bytes").unwrap();
     std::fs::write(local_assets.join("client-only.txt"), b"not on daemon").unwrap();
@@ -197,7 +201,7 @@ fn pull_reports_daemon_inventory_enumeration_failure() {
     daemon.post("/api/jellies", json!({"name": "sample", "project": "p", "view": VIEW, "verbs": VERBS, "by": "agent"}));
     ureq::post(&format!("{}/api/jellies/p:sample/assets/note.txt?by=agent", daemon.url))
         .send_bytes(b"daemon note").unwrap();
-    let assets = home.join("assets/p:sample");
+    let assets = home.join("assets").join(disk::name("p:sample"));
     std::fs::rename(&assets, home.join("saved-assets")).unwrap();
     std::fs::write(&assets, b"not a directory").unwrap();
     let inventory = ureq::get(&format!("{}/api/jellies/p:sample/assets", daemon.url)).call();
