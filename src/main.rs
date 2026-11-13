@@ -680,6 +680,10 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
                 .map_err(|e| format!("could not read asset inventory: {e}"))?;
             let files = serde_json::from_value::<Vec<String>>(inventory)
                 .map_err(|e| format!("invalid asset inventory: {e}"))?;
+            // This machine decides what it can store: a Unix daemon may hold a name Windows cannot.
+            for file in &files {
+                store::valid_file(file).map_err(|e| format!("cannot store asset {file} here: {e}"))?;
+            }
             std::fs::create_dir_all(dir.join("assets")).map_err(|e| e.to_string())?;
             std::fs::write(dir.join("view.html"), j["view"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;
             std::fs::write(dir.join("verbs.js"), j["verbs"].as_str().unwrap_or("")).map_err(|e| e.to_string())?;

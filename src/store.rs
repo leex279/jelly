@@ -1091,7 +1091,6 @@ impl Store {
                     return Err(std::io::Error::other("incomplete event history; repair events.jsonl before retrying"));
                 }
             }
-            file.seek(SeekFrom::End(0))?;
             let mut line = serde_json::to_vec(ev).expect("an event serializes");
             line.push(b'\n');
             #[cfg(test)]
@@ -1456,16 +1455,24 @@ fn valid_name(name: &str) -> Result<(), Error> {
     if ok { Ok(()) } else { Err(Error::Invalid(format!("bad name {name:?}: use 1-64 of a-z, 0-9, - and _, optionally as project:name"))) }
 }
 
-fn valid_file(file: &str) -> Result<(), Error> {
+/// The one rule for an asset file name. Every path that joins a name under
+/// `assets/` checks it first: the name is a single component that cannot leave
+/// the folder, and on Windows it is one the filesystem stores as given.
+pub(crate) fn valid_file(file: &str) -> Result<(), Error> {
     let ok = !file.is_empty() && file.len() <= 128 && !file.starts_with('.')
         && file.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.');
     if !ok { return Err(Error::Invalid(format!("bad file name {file:?}: use letters, digits, '.', '-' and '_'"))); }
+    if !cfg!(windows) { return Ok(()); }
     // Windows treats these stems as devices whatever the extension: `NUL` reports success and keeps nothing.
     let stem = file.split('.').next().unwrap_or("").to_ascii_uppercase();
     let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
         || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && matches!(stem.as_bytes()[3], b'1'..=b'9'));
-    if cfg!(windows) && device {
+    if device {
         return Err(Error::Invalid(format!("bad file name {file:?}: {stem} is a reserved name on Windows")));
+    }
+    // Windows drops a trailing '.', so `a.` would land on `a`.
+    if file.ends_with('.') {
+        return Err(Error::Invalid(format!("bad file name {file:?}: a name cannot end in '.' on Windows")));
     }
     Ok(())
 }
@@ -2028,12 +2035,12 @@ mod tests {
     }
 
     #[test]
-    fn asset_names_reject_windows_device_names() {
+    fn asset_names_reject_what_windows_cannot_store() {
         let (_d, mut s) = store();
         s.create("plan", "".into(), VERBS.into(), json!({}), "agent", false, "", "").unwrap();
-        for device in ["NUL", "con.txt", "COM1", "lpt9.png"] {
-            let saved = s.put_asset("plan", device, b"x", "agent");
-            assert_eq!(saved.is_err(), cfg!(windows), "{device}: {saved:?}");
+        for name in ["NUL", "con.txt", "COM1", "lpt9.png", "a.", "notes.."] {
+            let saved = s.put_asset("plan", name, b"x", "agent");
+            assert_eq!(saved.is_err(), cfg!(windows), "{name}: {saved:?}");
         }
         for ordinary in ["console.txt", "nul-report.md", "COM10", "lpt0.txt"] {
             s.put_asset("plan", ordinary, b"x", "agent").unwrap_or_else(|e| panic!("{ordinary}: {e}"));

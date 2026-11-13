@@ -82,7 +82,8 @@ fn pull_gets_assets_from_selected_daemon_with_separate_client_homes() {
     daemon.post("/api/jellies", json!({"name": "sample", "project": "p", "view": VIEW, "verbs": VERBS, "state": {"count": 7}, "by": "agent"}));
     let assets: [(&str, &[u8]); 6] = [
         ("note.txt", b"daemon note\n"), ("binary.bin", &[0, 255, 128, 10]),
-        ("a..", b"trailing dots"), ("a..txt", b"consecutive dots"),
+        // Windows drops trailing dots, and the daemon refuses them there.
+        (if cfg!(windows) { "a.-" } else { "a.." }, b"trailing dots"), ("a..txt", b"consecutive dots"),
         ("a...txt", b"longer dot run"), ("UPPER-_.txt", b"ordinary punctuation"),
     ];
     for (file, bytes) in assets {
@@ -137,11 +138,16 @@ fn pull_without_assets_writes_core_and_reports_zero() {
 fn pull_reports_inventory_and_download_failures() {
     use std::io::{BufRead, BufReader, Write};
 
-    for (inventory_status, inventory, download, diagnostic) in [
+    let mut cases = vec![
         ("200 OK", json!({"assets": []}), false, "asset inventory"),
         ("500 Internal Server Error", json!({"error": "inventory unavailable"}), false, "inventory unavailable"),
         ("200 OK", json!(["note.txt"]), true, "note.txt"),
-    ] {
+        ("200 OK", json!(["..\\escape.txt"]), false, "cannot store asset ..\\escape.txt"),
+    ];
+    if cfg!(windows) {
+        cases.push(("200 OK", json!(["NUL"]), false, "cannot store asset NUL"));
+    }
+    for (inventory_status, inventory, download, diagnostic) in cases {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
