@@ -1,3 +1,7 @@
+#[path = "../src/disk.rs"]
+#[allow(dead_code)]
+mod disk;
+
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
 use std::net::TcpListener;
@@ -109,7 +113,7 @@ fn event_log_failure(failure: Failure, closed_stderr: bool) {
             .unwrap()
             .contains("could not record event"));
         let saved: Value = serde_json::from_slice(
-            &std::fs::read(home.path().join("jellies/test:counter.json")).unwrap(),
+            &std::fs::read(home.path().join("jellies").join(format!("{}.json", disk::name("test:counter")))).unwrap(),
         )
         .unwrap();
         assert_eq!(saved["jelly"]["state"], created["state"]);
@@ -144,7 +148,7 @@ fn event_log_failure(failure: Failure, closed_stderr: bool) {
         }
     }
     let saved: Value = serde_json::from_slice(
-        &std::fs::read(home.path().join("jellies/test:counter.json")).unwrap(),
+        &std::fs::read(home.path().join("jellies").join(format!("{}.json", disk::name("test:counter")))).unwrap(),
     )
     .unwrap();
     assert_eq!(saved["jelly"]["state"], event["state"]);

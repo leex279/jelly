@@ -647,10 +647,9 @@ fn content_type(file: &str) -> &'static str {
 }
 
 async fn asset(State(app): State<Shared>, Path((name, file)): Path<(String, String)>) -> Response {
-    if file.starts_with('.') || file.contains('/') {
+    if crate::store::valid_file(&file).is_err() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // Only a known jelly id names a directory; an absolute or `..` name would escape `assets/`.
     let dir = {
         let store = app.store.lock().expect("store lock");
         match store.get(&name) {
@@ -1082,7 +1081,7 @@ fn now_ms() -> u64 {
 
 /// A browser the daemon can drive headless: JELLY_CHROME, or the usual installs.
 fn chrome() -> Option<String> {
-    let candidates = [
+    let mut candidates = vec![
         std::env::var("JELLY_CHROME").unwrap_or_default(),
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome".into(),
         "/Applications/Chromium.app/Contents/MacOS/Chromium".into(),
@@ -1092,6 +1091,19 @@ fn chrome() -> Option<String> {
         "/usr/bin/chromium".into(),
         "/usr/bin/chromium-browser".into(),
     ];
+    // Windows installs go under one of the program folders, which the environment names.
+    for (folder, install) in [
+        ("ProgramFiles", r"Google\Chrome\Application\chrome.exe"),
+        ("ProgramFiles(x86)", r"Google\Chrome\Application\chrome.exe"),
+        ("LOCALAPPDATA", r"Google\Chrome\Application\chrome.exe"),
+        ("LOCALAPPDATA", r"Chromium\Application\chrome.exe"),
+        ("ProgramFiles(x86)", r"Microsoft\Edge\Application\msedge.exe"),
+        ("ProgramFiles", r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+    ] {
+        if let Some(root) = std::env::var_os(folder) {
+            candidates.push(std::path::Path::new(&root).join(install).to_string_lossy().into_owned());
+        }
+    }
     candidates.into_iter().find(|c| !c.is_empty() && std::path::Path::new(c).exists())
 }
 
@@ -1119,9 +1131,15 @@ async fn run_browser(bin: &str, port: u16, name: &str, width: u32, height: u32, 
     let profile = std::env::temp_dir().join("jelly-chrome");
     let mut cmd = tokio::process::Command::new(bin);
     cmd.args(["--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--mute-audio"])
-        .arg(format!("--user-data-dir={}", profile.display()))
-        .arg(format!("--window-size={width},{height}"))
-        .arg("--virtual-time-budget=2500")
+        .arg(format!("--user-data-dir={}", profile.display()));
+    if cfg!(windows) {
+        // On Windows `--window-size` is the outer size, so the page comes out narrower than
+        // asked and its snapshot is refused; a fullscreen window on a screen of that size is exact.
+        cmd.arg(format!("--screen-info={{{width}x{height}}}")).arg("--start-fullscreen");
+    } else {
+        cmd.arg(format!("--window-size={width},{height}"));
+    }
+    cmd.arg("--virtual-time-budget=2500")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
@@ -1196,7 +1214,7 @@ where
     let png = if q.png {
         let dir = home.join("see");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(format!("{}-{width}.png", name.replace(':', "_")));
+        let path = dir.join(format!("{}-{width}.png", crate::disk::name(&name)));
         // The full page: as tall as the page said it was, within reason.
         let h = if q.full { snap.as_ref().map(|s| s.page_height).filter(|h| *h > height).unwrap_or(height).min(12000) } else { height };
         match render_page(width, h, Some(path.clone())).await {
@@ -2115,7 +2133,8 @@ mod tests {
         for path in [dir.join(".hidden"), dir.join("sub/secret.txt"), dir.parent().unwrap().join("secret.txt")] {
             std::fs::write(path, b"secret").unwrap();
         }
-        for file in [".hidden", ".", "..", "../secret.txt", "sub/secret.txt"] {
+        let absolute = dir.parent().unwrap().join("secret.txt").to_string_lossy().into_owned();
+        for file in [".hidden", ".", "..", "../secret.txt", "sub/secret.txt", "..\\secret.txt", "sub\\secret.txt", absolute.as_str()] {
             let response = asset(State(app.clone()), Path(("test:x".into(), file.into()))).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{file}");
         }
@@ -2131,7 +2150,7 @@ mod tests {
         }
         let outside = tempfile::tempdir().unwrap();
         std::fs::write(outside.path().join("note.txt"), b"SECRET-OUTSIDE").unwrap();
-        for dir in [home.path().join("beside"), home.path().join("assets/test:missing")] {
+        for dir in [home.path().join("beside"), home.path().join("assets").join(crate::disk::name("test:missing"))] {
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("note.txt"), b"SECRET-OUTSIDE").unwrap();
         }
@@ -2284,7 +2303,7 @@ mod tests {
             create_page(&app, "PAGE", false).await;
             let current = owner(&app, "test:x").await;
             post(&app, snapshot(&current, "PAGE", 1)).await.unwrap();
-            let png = dir.path().join("see/test_x-1280.png");
+            let png = dir.path().join("see").join(format!("{}-1280.png", crate::disk::name("test:x")));
             if old_png {
                 std::fs::create_dir_all(png.parent().unwrap()).unwrap();
                 std::fs::write(&png, b"old").unwrap();

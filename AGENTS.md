@@ -22,8 +22,9 @@ verbs), **jelly page** (the internal jelly, id `surface`, that lays out the othe
 - Comments (`comments`) and attention items live beside state, not in it. Undo does not touch them.
 - A jelly's id is `project:name`; the project is the part before the colon. Short
   names resolve in the CLI (current project) and the runtime (the view's project).
-- Assets live in `~/.jelly/assets/<id>/`, outside state and undo. Views are served at
-  `/j/<id>/` so `assets/<file>` resolves; keep that trailing slash.
+- Assets live in `~/.jelly/assets/<id>/`, outside state and undo. On Windows the folder
+  is `project+name`, because `:` is not allowed in a file name (`disk::name`). Views are
+  served at `/j/<id>/` so `assets/<file>` resolves; keep that trailing slash.
 - Never put network access in verbs. Live data is pushed in with `jelly call`.
 
 ## Check
@@ -34,4 +35,5 @@ cargo clippy
 ```
 
 For a manual run, use a throwaway home and port so your real jellies are untouched:
-`jelly serve --port 7879 --home /tmp/jelly-test`, then pass `--url http://127.0.0.1:7879`.
+`jelly serve --port 7879 --home /tmp/jelly-test` (PowerShell:
+`jelly serve --port 7879 --home $env:TEMP\jelly-test`), then pass `--url http://127.0.0.1:7879`.

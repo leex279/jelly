@@ -130,7 +130,7 @@
       "detail": "A second daemon, two hours later. The profile folder is the same one from 21:02.",
       "show": {
         "kind": "terminal",
-        "after": "$ jelly see review --full\npng      …/home2/see/demo_review-1280.png"
+        "after": "$ jelly see review --full\npng      …/home2/see/demo:review-1280.png"
       },
       "by": "agent"
     },
@@ -145,7 +145,7 @@
       "detail": "The very next command. The screenshot was written; the snapshot step timed out.",
       "show": {
         "kind": "terminal",
-        "after": "$ jelly see review --full --width 390\npng      …/home2/see/demo_review-390.png\n!        No snapshot: the browser took longer than 20 s"
+        "after": "$ jelly see review --full --width 390\npng      …/home2/see/demo:review-390.png\n!        No snapshot: the browser took longer than 20 s"
       },
       "by": "agent"
     },
@@ -161,7 +161,7 @@
       "detail": "Same failure a few minutes later, after the view changed.",
       "show": {
         "kind": "terminal",
-        "after": "$ jelly reshape review --view view.html\ndemo:review v6: reshape\n$ jelly see review --full --width 390\npng      …/home2/see/demo_review-390.png\n!        No snapshot: the browser took longer than 20 s"
+        "after": "$ jelly reshape review --view view.html\ndemo:review v6: reshape\n$ jelly see review --full --width 390\npng      …/home2/see/demo:review-390.png\n!        No snapshot: the browser took longer than 20 s"
       },
       "by": "agent"
     },
@@ -208,7 +208,7 @@
       "detail": "Three identical commands in a loop, nothing else running.",
       "show": {
         "kind": "terminal",
-        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo_example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo_example-1280.png\n1s",
+        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo:example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo:example-1280.png\n1s",
         "caption": "This one is the first line."
       },
       "by": "agent"
@@ -225,7 +225,7 @@
       "detail": "The second of the three, started the moment the first returned.",
       "show": {
         "kind": "terminal",
-        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo_example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo_example-1280.png\n1s",
+        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo:example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo:example-1280.png\n1s",
         "caption": "This one is the middle line."
       },
       "by": "agent"
@@ -242,7 +242,7 @@
       "detail": "The third, started the moment the failed one was killed.",
       "show": {
         "kind": "terminal",
-        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo_example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo_example-1280.png\n1s",
+        "after": "$ for i in 1 2 3; do jelly see example --full | grep \"png\\|^!\"; done\npng      …/see/demo:example-1280.png\n0s\n!        No screenshot: the browser took longer than 20 s\n20s\npng      …/see/demo:example-1280.png\n1s",
         "caption": "This one is the last line."
       },
       "by": "agent"

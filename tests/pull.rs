@@ -1,3 +1,7 @@
+#[path = "../src/disk.rs"]
+#[allow(dead_code)]
+mod disk;
+
 use serde_json::{json, Value};
 use std::io::Read;
 use std::net::TcpListener;
@@ -71,14 +75,15 @@ fn pull_gets_assets_from_selected_daemon_with_separate_client_homes() {
     let temp = tempfile::tempdir().unwrap();
     let daemon = Daemon::start(&temp.path().join("daemon"));
     let client = temp.path().join("client");
-    let local_assets = client.join("assets/p:sample");
+    let local_assets = client.join("assets").join(disk::name("p:sample"));
     std::fs::create_dir_all(&local_assets).unwrap();
     std::fs::write(local_assets.join("note.txt"), b"wrong client bytes").unwrap();
     std::fs::write(local_assets.join("client-only.txt"), b"not on daemon").unwrap();
     daemon.post("/api/jellies", json!({"name": "sample", "project": "p", "view": VIEW, "verbs": VERBS, "state": {"count": 7}, "by": "agent"}));
     let assets: [(&str, &[u8]); 6] = [
         ("note.txt", b"daemon note\n"), ("binary.bin", &[0, 255, 128, 10]),
-        ("a..", b"trailing dots"), ("a..txt", b"consecutive dots"),
+        // Windows drops trailing dots, and the daemon refuses them there.
+        (if cfg!(windows) { "a.-" } else { "a.." }, b"trailing dots"), ("a..txt", b"consecutive dots"),
         ("a...txt", b"longer dot run"), ("UPPER-_.txt", b"ordinary punctuation"),
     ];
     for (file, bytes) in assets {
@@ -133,11 +138,16 @@ fn pull_without_assets_writes_core_and_reports_zero() {
 fn pull_reports_inventory_and_download_failures() {
     use std::io::{BufRead, BufReader, Write};
 
-    for (inventory_status, inventory, download, diagnostic) in [
+    let mut cases = vec![
         ("200 OK", json!({"assets": []}), false, "asset inventory"),
         ("500 Internal Server Error", json!({"error": "inventory unavailable"}), false, "inventory unavailable"),
         ("200 OK", json!(["note.txt"]), true, "note.txt"),
-    ] {
+        ("200 OK", json!(["..\\escape.txt"]), false, "cannot store asset ..\\escape.txt"),
+    ];
+    if cfg!(windows) {
+        cases.push(("200 OK", json!(["NUL"]), false, "cannot store asset NUL"));
+    }
+    for (inventory_status, inventory, download, diagnostic) in cases {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -197,7 +207,7 @@ fn pull_reports_daemon_inventory_enumeration_failure() {
     daemon.post("/api/jellies", json!({"name": "sample", "project": "p", "view": VIEW, "verbs": VERBS, "by": "agent"}));
     ureq::post(&format!("{}/api/jellies/p:sample/assets/note.txt?by=agent", daemon.url))
         .send_bytes(b"daemon note").unwrap();
-    let assets = home.join("assets/p:sample");
+    let assets = home.join("assets").join(disk::name("p:sample"));
     std::fs::rename(&assets, home.join("saved-assets")).unwrap();
     std::fs::write(&assets, b"not a directory").unwrap();
     let inventory = ureq::get(&format!("{}/api/jellies/p:sample/assets", daemon.url)).call();
