@@ -134,6 +134,27 @@
     .factions { grid-column: 1 / -1; flex-wrap: wrap; gap: 8px; }
   }
   .full iframe { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--card); }
+  .fbar .viewing { color: var(--accent-ink); font-weight: 600; }
+  .btn.warm { background: var(--sun); border-color: var(--sun); color: var(--sun-ink); }
+
+  /* history: the versions of the open jelly, newest first */
+  .hist { flex-shrink: 0; max-height: 40vh; overflow-y: auto; background: var(--card); border-bottom: 1px solid var(--line); padding: 6px 16px 10px; }
+  .hist[hidden] { display: none; }
+  .hist .hh { display: flex; gap: 8px; align-items: baseline; color: var(--muted); font-size: 12px; padding: 4px 0 6px; }
+  .hist .hh b { color: var(--ink); font-size: 12.5px; }
+  .hrow { display: grid; grid-template-columns: 44px 72px minmax(60px, 100px) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 4px 6px; border-radius: 8px; font-size: 12.5px; }
+  .hrow:hover { background: var(--page); }
+  .hrow.cur { background: var(--brand-soft); }
+  .hrow.look { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .hrow code { font: 12px ui-monospace, Menlo, monospace; }
+  .hrow .when, .hrow .who { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hrow .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .what .star { color: var(--sun-ink); background: var(--sun-soft); border-radius: 999px; padding: 0 7px; margin-left: 6px; font-size: 11.5px; }
+  .hrow .hacts { display: flex; gap: 4px; }
+  @media (max-width: 900px) {
+    .hrow { grid-template-columns: 40px minmax(0, 1fr) auto; }
+    .hrow .when, .hrow .who { display: none; }
+  }
 
   /* ---- brand and motion: calm base, jelly physics at key moments ---- */
   .logo { flex: none; transform-origin: 50% 90%; cursor: pointer; }
@@ -203,12 +224,15 @@
     <button class="btn" id="back" title="Back to the stream (Esc)">← Back</button>
     <div class="title"><h1 id="ftitle"></h1><div class="who" id="fmeta"></div></div>
     <div class="factions">
+      <button class="btn warm" id="frestore" hidden></button>
       <button class="btn" id="fcomment" title="Pin a comment to any part (c)">Comment</button>
+      <button class="btn quiet" id="fhist" title="Earlier versions: look at one, restore one, keep one">History</button>
       <button class="btn quiet" id="fundo">Undo</button>
       <button class="btn quiet" id="fpin"></button>
       <button class="btn quiet" id="frm">Remove</button>
     </div>
   </div>
+  <div class="hist" id="hist" hidden></div>
 </section>
 <script>
   // The stream: every unpinned jelly in the order agents made them, each with
@@ -222,6 +246,7 @@
   const tiles = new Map();     // name -> pinned tile
   const lastEvent = new Map(); // name -> {text, by, at}
   let sel = null, full = null, booted = false;
+  let viewing = null, histOpen = false; // the version the full view shows read only, and whether its list is open
   let archived = [], showArchived = false; // jellies hidden after a quiet week
   // /p/<project> is this same page showing one project's jellies; / shows all.
   const PROJECT = location.pathname.startsWith("/p/") ? decodeURIComponent(location.pathname.slice(3)) : null;
@@ -547,11 +572,9 @@
     if (full !== name) {
       pendingAttend = null;
       full = name;
-      $("full").querySelector("iframe")?.remove();
-      const f = document.createElement("iframe");
-      f.src = `/j/${enc(name)}/`;
-      f.title = name;
-      $("full").appendChild(f);
+      viewing = null;
+      histOpen = false;
+      showFrame(`/j/${enc(name)}/`);
     }
     $("full").hidden = false;
     renderFull();
@@ -559,23 +582,90 @@
     if (!fromAgent) writeFocus(name);
     setTimeout(() => markSeen(name), 800);
   }
+  function showFrame(src) {
+    $("full").querySelector("iframe")?.remove();
+    const f = document.createElement("iframe");
+    f.src = src;
+    f.title = full;
+    $("full").appendChild(f);
+  }
   function renderFull() {
     const j = byName(full);
     if (!j) return closeFull();
     $("ftitle").textContent = j.about || j.name;
-    $("fmeta").innerHTML = `<code>${esc(short(j.name))}</code><span>by ${esc(who(j.made_by))}</span><span>v${j.version}</span><span>${ago(j.updated_ms)}</span>${flags(j)}`;
+    const look = viewing ? `<span class="viewing">viewing v${viewing} · read only</span>` : "";
+    $("fmeta").innerHTML = `<code>${esc(short(j.name))}</code><span>by ${esc(who(j.made_by))}</span><span>v${j.version}</span><span>${ago(j.updated_ms)}</span>${look}${flags(j)}`;
     $("fpin").textContent = j.pinned ? "Unpin" : "Pin";
+    $("back").textContent = viewing ? "← Live" : "← Back";
+    $("back").title = viewing ? "Back to the live jelly (Esc)" : "Back to the stream (Esc)";
+    $("fcomment").disabled = $("fundo").disabled = !!viewing;
+    $("frestore").hidden = !viewing;
+    if (viewing) $("frestore").textContent = `Restore v${viewing}`;
+    $("fhist").classList.toggle("on", histOpen);
+    $("hist").hidden = !histOpen;
+    if (histOpen) renderHistory();
   }
   function closeFull(fromAgent) {
     pendingAttend = null;
     if (!full) return;
     const was = full;
     full = null;
+    viewing = null;
+    histOpen = false;
     $("full").hidden = true;
+    $("hist").hidden = true;
     $("full").querySelector("iframe")?.remove();
     if (entries.has(was)) select(was, true);
     if (!fromAgent) writeFocus(null);
   }
+
+  // ---- history: the versions of the open jelly ---------------------------------
+
+  // Look switches the frame to the read-only version; Restore brings one back as
+  // a new change; Keep names one so the undo limits never drop it.
+  function lookAt(version) {
+    viewing = version;
+    showFrame(version ? `/j/${enc(full)}/v/${version}/` : `/j/${enc(full)}/`);
+    setCommenting($("fcomment"), false);
+    renderFull();
+  }
+  function whatChanged(v) {
+    if (v.kind === "call") return `call ${v.verb}`;
+    if (v.kind === "set") return "set state";
+    if (v.kind === "revert") return `restored v${v.restored}`;
+    if (v.kind === "new") return "made";
+    return v.kind;
+  }
+  async function renderHistory() {
+    const name = full;
+    const r = await fetch(`/api/jellies/${enc(name)}/history`);
+    if (!r.ok || name !== full || !histOpen) return;
+    const list = await r.json();
+    const rows = list.map((v) => {
+      if (v.version == null) return `<div class="hrow"><code>v?</code><span class="when">?</span><span class="who">?</span><span class="what">saved before history</span><span class="hacts"></span></div>`;
+      const star = v.kept ? `<span class="star">★ ${esc(v.kept)}</span>` : "";
+      const acts = [
+        v.current ? "" : `<button class="btn quiet" data-look="${v.version}">Look</button>`,
+        v.current ? "" : `<button class="btn quiet" data-restore-v="${v.version}">Restore</button>`,
+        `<button class="btn quiet" data-keep="${v.version}" data-who="${esc(who(v.by))}" data-at="${v.at_ms}">${v.kept ? "Rename" : "Keep"}</button>`,
+      ].join("");
+      return `<div class="hrow${v.current ? " cur" : ""}${v.version === viewing ? " look" : ""}"><code>v${v.version}</code><span class="when">${ago(v.at_ms)}</span><span class="who">${esc(who(v.by))}</span><span class="what">${esc(whatChanged(v))}${v.current ? " · current" : ""}${star}</span><span class="hacts">${acts}</span></div>`;
+    });
+    $("hist").innerHTML = `<div class="hh"><b>Versions</b><span>newest first · Look shows one read only, Restore brings it back as a new change, Keep names it so it is never dropped</span></div>${rows.join("")}`;
+  }
+  $("fhist").onclick = () => { histOpen = !histOpen; renderFull(); };
+  $("frestore").onclick = () => viewing && act(`/api/jellies/${enc(full)}/history/${viewing}/restore`, {});
+  $("hist").addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b || !full) return;
+    if (b.dataset.look) return lookAt(+b.dataset.look);
+    if (b.dataset.restoreV) return act(`/api/jellies/${enc(full)}/history/${b.dataset.restoreV}/restore`, {});
+    if (b.dataset.keep) {
+      const when = new Date(+b.dataset.at).toLocaleString();
+      const label = prompt(`Name version ${b.dataset.keep}`, `v${b.dataset.keep} by ${b.dataset.who} · ${when}`);
+      if (label && label.trim()) act(`/api/jellies/${enc(full)}/history/${b.dataset.keep}/keep`, { label: label.trim() });
+    }
+  });
 
   // ---- comments -------------------------------------------------------------
 
@@ -598,7 +688,7 @@
     const d = e.data;
     if (d?.type === "jelly:commenting") { const b = buttonOf(d.name); if (b) setCommenting(b, d.on); }
     if (d?.type === "jelly:show" && byName(d.name)) openFull(d.name);
-    if (d?.type === "jelly:escape" && full) closeFull();
+    if (d?.type === "jelly:escape" && full) { if (viewing) lookAt(null); else closeFull(); }
   });
 
   // ---- actions --------------------------------------------------------------
@@ -626,7 +716,7 @@
     if (!name) return;
     if (entries.has(name) && !full) select(name, true); else openFull(name);
   });
-  $("back").onclick = () => closeFull();
+  $("back").onclick = () => (viewing ? lookAt(null) : closeFull());
   $("fcomment").onclick = () => toggleComment(full);
   $("fundo").onclick = () => act(`/api/jellies/${enc(full)}/undo`, {});
   $("fpin").onclick = () => pin(full);
@@ -640,8 +730,8 @@
     if (e.target.closest("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === "Escape" && dockOpen) return setDock(false);
     if (e.key === "a") return setDock(!dockOpen);
-    if (e.key === "Escape" && full) return closeFull();
-    if (e.key === "c") return toggleComment(full || sel);
+    if (e.key === "Escape" && full) return viewing ? lookAt(null) : closeFull();
+    if (e.key === "c") { if (!viewing) toggleComment(full || sel); return; }
     if (full) return;
     const names = [...entries.keys()].sort((a, b) => byName(b).created_ms - byName(a).created_ms);
     const i = names.indexOf(sel);
@@ -658,6 +748,8 @@
     if (ev.kind === "comment") return "commented";
     if (ev.kind === "reply") return "replied on a comment";
     if (ev.kind === "reshape") return "reshaped it";
+    if (ev.kind === "revert") return `restored v${ev.args?.version}`;
+    if (ev.kind === "keep") return `kept v${ev.args?.version}`;
     if (ev.kind === "working") return ev.args ? `started: ${ev.args}` : "finished";
     if (ev.kind === "attention") return `asked: ${ev.args?.title || ""}`;
     if (ev.kind === "answer") return "answered";
@@ -700,6 +792,9 @@
     if (ev.kind !== "remove") lastEvent.set(ev.jelly, { text: describe(ev), by: ev.by, at: ev.at_ms || Date.now() });
     const el = entries.get(ev.jelly);
     if (el) { el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse"); }
+    // A version view never reloads itself; once the jelly's view, verbs or state
+    // move on (a restore most of all), the page goes back to the live jelly.
+    if (ev.jelly === full && viewing && ["revert", "reshape", "undo", "call", "set", "new"].includes(ev.kind)) lookAt(null);
     clearTimeout(pending);
     pending = setTimeout(refresh, 120); // one refresh per burst of changes
   });
