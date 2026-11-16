@@ -46,6 +46,10 @@ jelly call plan add '{"title":"…"}'  # run a verb yourself; '@args.json' or - 
 jelly set plan --at /title '"Better title"'   # write state yourself, no verb needed
 jelly set plan --at /draft --rm      # remove a key; `jelly set plan @state.json` replaces it all
 jelly undo plan                      # undo the last change to view, verbs or state
+jelly history plan                   # every version: when, who, what; `jelly undo` walks this list
+jelly see plan --version 9           # what v9 is and how it differs; its read-only URL
+jelly restore plan 9                 # bring v9 back as a new change (undoable; nothing after it is lost)
+jelly keep plan 9 "before the redesign"   # name a version so the undo limits never drop it
 jelly pin plan                       # keep it; unpinned jellies archive after a quiet week
 jelly rm plan
 ```
@@ -315,7 +319,8 @@ A jelly is named `project:name`. The project is the git repo you run `jelly` in
 repo makes `archon:plan`, and `jelly call plan …` there finds it. Elsewhere use the
 full name. Inside a view, `jelly.read("plan")` means this project's plan. The
 person sees each project on its own page, `/p/<project>`. `jelly move NAME OTHER`
-moves a jelly; `jelly restore NAME` brings back an archived one.
+moves a jelly; `jelly restore NAME` brings back an archived one, and
+`jelly restore NAME VERSION` brings back an older version of one.
 
 ## Files, assets, design, sharing
 

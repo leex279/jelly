@@ -26,6 +26,10 @@ prose, and whenever you need them to choose.
   waiting on them and what they did lately. `--png` when layout matters.
 - **Keep working on it together.** Reshape while it runs and state stays. Write
   state yourself with `jelly set`. Undo the last change. Notes for the next agent. One page per project. Share as one file.
+- **Go back.** `jelly history NAME` lists every version with who made it and how;
+  `jelly see NAME --version N` looks at one; `jelly restore NAME N` brings it back
+  as a new, undoable change; `jelly keep NAME N "label"` names one so the undo
+  limits never drop it. The person has the same on the jelly page.
 
 ```bash
 jelly ls                                         # list jellies; starts the daemon on first use
@@ -143,6 +147,16 @@ jelly's next change. Converted history is exempt from the new byte budget until
 new history displaces it, within the same 100-step limit. An older binary cannot
 read a rewritten file: it skips that jelly with a `missing field` error. To go
 back to an older binary, keep a copy of `~/.jelly/jellies/` from before the upgrade.
+
+Version history adds who, when and what kind of change to each undo step, the
+change behind the oldest state the steps reach, and kept versions, all in the
+jelly's own file. Old files load as they are: steps saved before this show in
+`jelly history` as `v?` with unknown author, time and kind, and stay reachable
+only through `jelly undo`; the file is rewritten in the new form at the jelly's
+next change. An older binary still reads the new file but drops kept versions
+and the oldest-version record at its next rewrite, and refuses to start on an
+`events.jsonl` that holds a `revert` or `keep` event. Keep a copy of `~/.jelly/`
+before going back.
 
 `jelly pull` gets asset names and bytes from the selected daemon, regardless of
 its home or the client's home. GET `/api/jellies/{name}/assets` returns a sorted
