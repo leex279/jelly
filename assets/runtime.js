@@ -16,8 +16,13 @@
 //
 // A reshape or an undo that changes the view reloads the page. State lives in
 // the daemon, so nothing is lost.
+//
+// An older version (/j/<name>/v/<n>/) boots read only: it never reloads, posts
+// no snapshot, and every write rejects. Restore it to change it.
 (() => {
   const boot = window.__JELLY__;
+  const readOnly = boot.readOnly || null;
+  const readOnlyError = () => new Error(`This is version ${readOnly.version} of ${boot.name}, read only. Restore it to change it.`);
   // Errors the page hits, so `jelly see` can tell the agent its page is broken.
   const errors = [];
   let snapT = null;
@@ -68,6 +73,7 @@
   }
 
   async function post(path, body) {
+    if (readOnly) throw readOnlyError();
     const r = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -100,6 +106,7 @@
       document.body.innerHTML = '<p style="font:14px system-ui;padding:16px;opacity:.7">This jelly was removed.</p>';
       return;
     }
+    if (readOnly) return;
     if (ev.kind === "new" || ev.view_rev !== boot.viewRev) { location.reload(); return; }
     if (ev.kind === "comment" || ev.kind === "resolve" || ev.kind === "reply") refreshThreads().catch(console.error);
     if (ev.kind === "attention" || ev.kind === "answer" || ev.kind === "withdraw") refreshThreads().catch(console.error);
@@ -188,6 +195,9 @@
     .jf-pop .jf-done { font-size: 11px; color: #66726f; }
     .jf-work { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); z-index: 2147483000; background: #141a19; color: #e8eeec; border-radius: 999px; padding: 6px 14px 6px 12px; font: 12.5px -apple-system, sans-serif; display: flex; gap: 8px; align-items: center; box-shadow: 0 8px 24px -8px rgba(0,0,0,.5); }
     .jf-work i { width: 8px; height: 8px; border-radius: 50%; background: #46c4b8; animation: jf-blink 1s infinite; } @keyframes jf-blink { 50% { opacity: .3; } }
+    .jf-version { position: fixed; left: 50%; top: 10px; transform: translateX(-50%); z-index: 2147483000; background: #141a19; color: #e8eeec; border-radius: 999px; padding: 6px 8px 6px 14px; font: 12.5px -apple-system, sans-serif; display: flex; gap: 10px; align-items: center; box-shadow: 0 8px 24px -8px rgba(0,0,0,.5); }
+    .jf-version button { font: 12px -apple-system, sans-serif; color: #e8eeec; border: 1px solid #3a4446; background: transparent; border-radius: 999px; padding: 3px 10px; cursor: pointer; }
+    .jf-version button.jf-restore { background: #e0a24f; color: #1b2221; border-color: #e0a24f; }
     `;
   let commenting = false, hovered = null, pop = null;
   const btn = document.createElement("button");
@@ -196,7 +206,7 @@
   btn.title = "Pin a comment to any part of this jelly (or hold Option and click)";
 
   // Everything the runtime adds to a view. Selectors name view elements only.
-  const OURS = ".jf-btn, .jf-pop, .jf-marker, .jf-ask, .jf-work";
+  const OURS = ".jf-btn, .jf-pop, .jf-marker, .jf-ask, .jf-work, .jf-version";
   const isOurs = (el) => el.closest(OURS);
   function selectorFor(el) {
     const parts = [];
@@ -795,6 +805,26 @@
   // A page that shows its own questions (the ask page) opts out:
   // <meta name="jelly-attention" content="inline">.
   const inline = () => document.querySelector('meta[name="jelly-attention"]')?.content === "inline";
+  // Alone in a tab, a version view says what it is and offers the way back; on
+  // the jelly page the page's own bar does.
+  function drawVersionBanner() {
+    const ago = (ms) => { const s = Math.max(0, (Date.now() - ms) / 1000); return s < 60 ? "just now" : s < 3600 ? `${Math.floor(s / 60)}m ago` : s < 86400 ? `${Math.floor(s / 3600)}h ago` : `${Math.floor(s / 86400)}d ago`; };
+    const bar = document.createElement("div");
+    bar.className = "jf-version";
+    bar.innerHTML = '<span></span><button class="jf-live">Back to live</button><button class="jf-restore"></button>';
+    const who = readOnly.by === "person" ? "you" : readOnly.by;
+    bar.querySelector("span").textContent = `Version ${readOnly.version} of ${boot.name} · read only · ${who} · ${ago(readOnly.at_ms)}${readOnly.kept ? ` · "${readOnly.kept}"` : ""}`;
+    bar.querySelector(".jf-restore").textContent = `Restore v${readOnly.version}`;
+    const live = `/j/${enc(boot.name)}/`;
+    bar.querySelector(".jf-live").onclick = () => { location.href = live; };
+    bar.querySelector(".jf-restore").onclick = async () => {
+      const r = await fetch(`${api}/history/${readOnly.version}/restore`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ by: "person" }) });
+      if (!r.ok) return alert((await r.json()).error || r.statusText);
+      location.href = live;
+    };
+    document.body.appendChild(bar);
+  }
+
   let workEl = null;
   function drawWorking() {
     workEl?.remove();
@@ -837,8 +867,9 @@
     return lines.join("\n");
   }
   // At most one post per interval, so a page that changes all the time still reports.
+  // A version view has no owner to post with; it reports nothing.
   function postSnapshot() {
-    if (snapT) return;
+    if (snapT || readOnly) return;
     snapT = setTimeout(() => {
       snapT = null;
       fetch(`${api}/screen`, { method: "POST", headers: { "content-type": "application/json" },
@@ -887,7 +918,8 @@
     document.head.appendChild(style);
     // A view that draws its own comment control opts out with <meta name="jelly-comment" content="off">.
     const optOut = document.querySelector('meta[name="jelly-comment"]')?.content === "off";
-    if (!embedded && !optOut) document.body.appendChild(btn);
+    if (!embedded && !optOut && !readOnly) document.body.appendChild(btn);
+    if (readOnly && !embedded) drawVersionBanner();
     drawMarkers();
     drawWorking();
     new ResizeObserver(queueDraw).observe(document.body);
