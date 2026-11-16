@@ -107,16 +107,31 @@ enum Cmd {
         about: Option<String>,
     },
     /// Undo the last change to the view, verbs or state, by anyone. Comments,
-    /// answers and pins are not undone.
+    /// answers and pins are not undone. `jelly history NAME` lists what undo would reach.
     Undo { name: String },
+    /// List the versions of a jelly, newest first: when, who, and what kind of
+    /// change. Look at one with `jelly see NAME --version N`, bring one back with
+    /// `jelly restore NAME N`, name one with `jelly keep`.
+    History {
+        name: String,
+        /// Print the full JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Name a version ("before the redesign") so it survives the undo limits.
+    Keep { name: String, version: String, label: String },
     /// Keep a jelly.
     Pin { name: String },
     /// Stop keeping a jelly.
     Unpin { name: String },
     /// Remove a jelly and its history.
     Rm { name: String },
-    /// Print the full jelly: view, verbs, state.
-    Show { name: String },
+    /// Print the full jelly: view, verbs, state. With --version, an older version.
+    Show {
+        name: String,
+        #[arg(long)]
+        version: Option<String>,
+    },
     /// Stream events as JSON lines, for one jelly or all.
     #[command(alias = "watch")]
     Events {
@@ -205,6 +220,10 @@ enum Cmd {
         /// Screenshot the whole page, not just the first screen (implies --png).
         #[arg(long)]
         full: bool,
+        /// An older version (12 or v12): what it is, what differs, and its read-only
+        /// URL. Nothing is rendered and the live jelly is untouched.
+        #[arg(long)]
+        version: Option<String>,
     },
     /// Leave a note for the next agent who picks this jelly up.
     Note { name: String, text: String },
@@ -266,8 +285,9 @@ enum Cmd {
     Resolve { name: String, id: String },
     /// Hide a jelly from the jelly page without deleting it.
     Archive { name: String },
-    /// Bring an archived jelly back to the jelly page.
-    Restore { name: String },
+    /// Bring an archived jelly back to the jelly page, or with VERSION bring an
+    /// older version back as a new, undoable change. Nothing after it is lost.
+    Restore { name: String, version: Option<String> },
     /// Add files (images, video, models, data) next to a jelly. A view refers
     /// to them as `assets/<file>`. They stay out of state and undo.
     Asset {
@@ -481,10 +501,29 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
             report(send("POST", &api(&format!("/{}/reshape", id(&name)?)), body)?)
         }
         Cmd::Undo { name } => report(send("POST", &api(&format!("/{}/undo", id(&name)?)), json!({"by": by}))?),
+        Cmd::History { name, json } => {
+            let name = id(&name)?;
+            let list = get(&api(&format!("/{name}/history")))?;
+            if json {
+                return print(list);
+            }
+            for line in history_lines(&list) {
+                output(format_args!("{line}\n"))?;
+            }
+            output(format_args!("jelly see {name} --version N · jelly restore {name} N · jelly keep {name} N \"label\"\n"))?;
+            Ok(())
+        }
+        Cmd::Keep { name, version, label } => {
+            let v = parse_version(&version)?;
+            report(send("POST", &api(&format!("/{}/history/{v}/keep", id(&name)?)), json!({"label": label, "by": by}))?)
+        }
         Cmd::Pin { name } => report(send("POST", &api(&format!("/{}/pin", id(&name)?)), json!({"by": by, "pinned": true}))?),
         Cmd::Unpin { name } => report(send("POST", &api(&format!("/{}/pin", id(&name)?)), json!({"by": by, "pinned": false}))?),
         Cmd::Rm { name } => report(send("DELETE", &api(&format!("/{}?by={}", id(&name)?, encode(&by))), Value::Null)?),
-        Cmd::Show { name } => print(get(&api(&format!("/{}", id(&name)?)))?),
+        Cmd::Show { name, version } => match version {
+            Some(v) => print(get(&api(&format!("/{}/history/{}", id(&name)?, parse_version(&v)?)))?),
+            None => print(get(&api(&format!("/{}", id(&name)?)))?),
+        },
         Cmd::Events { name, state } => {
             let name = name.map(|n| id(&n)).transpose()?;
             let q = name.map(|n| format!("?jelly={}", encode(&n))).unwrap_or_default();
@@ -660,8 +699,9 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
         }
         Cmd::Reply { name, id: cid, text, resolve } => report(send("POST", &api(&format!("/{}/reply", id(&name)?)), json!({"id": cid, "text": text, "resolve": resolve, "by": by}))?),
         Cmd::Move { name, project } => report(send("POST", &api(&format!("/{}/move", id(&name)?)), json!({"project": project, "by": by}))?),
-        Cmd::See { name, width, png, full } => {
+        Cmd::See { name, width, png, full, version } => {
             let mut q = vec![];
+            if let Some(v) = version { q.push(format!("version={}", parse_version(&v)?)); }
             if let Some(w) = width { q.push(format!("width={w}")); }
             if png || full { q.push("png=true".into()); }
             if full { q.push("full=true".into()); }
@@ -739,7 +779,11 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
             }
         }
         Cmd::Archive { name } => report(send("POST", &api(&format!("/{}/archive", id(&name)?)), json!({"by": by}))?),
-        Cmd::Restore { name } => report(send("POST", &api(&format!("/{}/restore", id(&name)?)), json!({"by": by}))?),
+        Cmd::Restore { name, version: None } => report(send("POST", &api(&format!("/{}/restore", id(&name)?)), json!({"by": by}))?),
+        Cmd::Restore { name, version: Some(v) } => {
+            let v = parse_version(&v)?;
+            report(send("POST", &api(&format!("/{}/history/{v}/restore", id(&name)?)), json!({"by": by}))?)
+        }
         Cmd::Asset { name, files } => {
             let added = add_assets(&api(&format!("/{}", id(&name)?)), &files, &by)?;
             for line in added {
@@ -980,6 +1024,39 @@ fn answer_line(item: &store::Attention) -> String {
     format!("{} answered: {}", item.id, what.join(" · "))
 }
 
+/// A version as `jelly history` prints it: `12` or `v12`.
+fn parse_version(token: &str) -> Result<u64, String> {
+    let digits = token.strip_prefix('v').unwrap_or(token);
+    digits.parse().ok().filter(|_| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()))
+        .ok_or_else(|| format!("{token:?} is not a version; use a number from `jelly history`, such as 12 or v12"))
+}
+
+/// `jelly history`, one version per line, newest first.
+fn history_lines(list: &Value) -> Vec<String> {
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    list.as_array().into_iter().flatten().map(|v| {
+        let Some(version) = v["version"].as_u64() else {
+            return format!("{:<5} {:<9} {:<8} unknown (saved before history)", "v?", "?", "?");
+        };
+        let what = match s(&v["kind"]).as_str() {
+            "call" => format!("call {}", s(&v["verb"])),
+            "set" => "set state".into(),
+            "revert" => format!("restored v{}", v["restored"]),
+            "new" => "made".into(),
+            k => k.to_string(),
+        };
+        let marks = [v["current"].as_bool().unwrap_or(false).then(|| "(current)".to_string()), v["kept"].as_str().map(|l| format!("★ {l:?}"))];
+        let marks: Vec<String> = marks.into_iter().flatten().collect();
+        format!("{:<5} {:<9} {:<8} {what:<26}{}", format!("v{version}"), ago(v["at_ms"].as_u64().unwrap_or(0)), s(&v["by"]), if marks.is_empty() { String::new() } else { format!(" {}", marks.join(" ")) }).trim_end().to_string()
+    }).collect()
+}
+
+fn ago(ms: u64) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let s = now.saturating_sub(ms) / 1000;
+    match s { 0..=59 => "just now".into(), 60..=3599 => format!("{}m ago", s / 60), 3600..=86399 => format!("{}h ago", s / 3600), _ => format!("{}d ago", s / 86400) }
+}
+
 /// One line on what a write did. The full event is in `jelly events`.
 fn report(ev: Value) -> Result<(), CommandError> {
     output(format_args!("{}\n", report_line(&ev)))?;
@@ -993,6 +1070,8 @@ fn report_line(ev: &Value) -> String {
         "attention" => format!("asked {} {:?}; {}. Answers arrive in `jelly inbox`", s(&ev["args"]["id"]), s(&ev["args"]["title"]), placement(ev)),
         "set" => if s(&ev["args"]["pointer"]).is_empty() { "state replaced".into() } else { format!("set {}", s(&ev["args"]["pointer"])) },
         "new" => "made".into(),
+        "revert" => format!("restored v{}", ev["args"]["version"]),
+        "keep" => format!("kept v{} as {:?}", ev["args"]["version"], s(&ev["args"]["label"])),
         k => k.to_string(),
     };
     let changed: Vec<String> = ev["changed"].as_array().into_iter().flatten().filter_map(|c| c.as_str()).filter(|c| !c.is_empty()).map(String::from).collect();
@@ -1115,7 +1194,7 @@ fn encode(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{answer_line, placement, wait_line, write_output};
+    use super::{answer_line, history_lines, parse_version, placement, report_line, wait_line, write_output};
     use std::io::{self, Write};
     use serde_json::json;
 
@@ -1177,6 +1256,35 @@ mod tests {
                 assert_eq!(error.kind(), kind);
             }
         }
+    }
+
+    #[test]
+    fn versions_parse_as_numbers_with_or_without_v() {
+        assert_eq!(parse_version("12"), Ok(12));
+        assert_eq!(parse_version("v12"), Ok(12));
+        for bad in ["v", "", "12a", "v-1", "vv1", "1.0"] {
+            assert!(parse_version(bad).unwrap_err().contains("jelly history"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn history_and_restore_print_one_line_each() {
+        let ev = |kind: &str, args: serde_json::Value| json!({"jelly": "p:x", "version": 7, "seq": 9, "kind": kind, "args": args, "changed": ["/n"]});
+        assert_eq!(report_line(&ev("revert", json!({"version": 2}))), "p:x v7: restored v2 · changed /n · since seq:9");
+        assert_eq!(report_line(&ev("keep", json!({"version": 2, "label": "before"}))), "p:x v7: kept v2 as \"before\" · changed /n · since seq:9");
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        let lines = history_lines(&json!([
+            {"version": 7, "by": "person", "at_ms": now, "kind": "call", "verb": "pick", "kept": null, "current": true},
+            {"version": 3, "by": "agent", "at_ms": now - 7_200_000, "kind": "reshape", "kept": "before the redesign", "current": false},
+            {"version": 2, "by": "agent", "at_ms": now, "kind": "revert", "restored": 1, "kept": null, "current": false},
+            {"kept": null, "current": false},
+        ]));
+        assert_eq!(lines, [
+            "v7    just now  person   call pick                  (current)",
+            "v3    2h ago    agent    reshape                    ★ \"before the redesign\"",
+            "v2    just now  agent    restored v1",
+            "v?    ?         ?        unknown (saved before history)",
+        ]);
     }
 
     #[test]

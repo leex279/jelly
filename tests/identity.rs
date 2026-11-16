@@ -70,6 +70,8 @@ fn short_name_commands_stop_when_identity_lookup_fails() {
         vec!["reply", "plan", "c1", "answer"], vec!["move", "plan", "other"],
         vec!["see", "plan"], vec!["note", "plan", "note"], vec!["pull", "plan"],
         vec!["dev", "plan", "missing"], vec!["archive", "plan"], vec!["restore", "plan"],
+        vec!["restore", "plan", "2"], vec!["history", "plan"], vec!["keep", "plan", "2", "label"],
+        vec!["see", "plan", "--version", "2"], vec!["show", "plan", "--version", "v2"],
         vec!["asset", "plan", "asset.txt"], vec!["share", "plan"], vec!["resolve", "plan", "c1"],
         vec!["open", "plan"],
     ];
