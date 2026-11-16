@@ -2558,9 +2558,14 @@ mod tests {
         assert_eq!(s.get("j").unwrap().state, json!({"labels": {}}), "undo history is saved too");
     }
 
-    fn summary(v: &Version) -> (Option<u64>, Option<&str>, Option<EventKind>, Option<&str>, Option<&str>, bool) {
-        let c = v.change.as_ref();
-        (c.map(|c| c.version), c.map(|c| c.by.as_str()), c.map(|c| c.kind), c.and_then(|c| c.verb.as_deref()), v.kept.as_deref(), v.current)
+    /// `v5 agent set - - current`: version, author, kind, verb, label, currentness.
+    fn summary(v: &Version) -> String {
+        let kind = |c: &Change| serde_json::to_value(c.kind).unwrap().as_str().unwrap().to_string();
+        let (version, by, kind, verb) = match &v.change {
+            Some(c) => (format!("v{}", c.version), c.by.clone(), kind(c), c.verb.clone().unwrap_or("-".into())),
+            None => ("v?".into(), "?".into(), "?".into(), "-".into()),
+        };
+        format!("{version} {by} {kind} {verb} {} {}", v.kept.as_deref().unwrap_or("-"), if v.current { "current" } else { "-" })
     }
 
     #[test]
@@ -2573,10 +2578,10 @@ mod tests {
         s.set_state("j", "/labels/b", Some(json!("y")), "agent").unwrap();
         let h = s.history("j").unwrap();
         assert_eq!(h.iter().map(summary).collect::<Vec<_>>(), [
-            (Some(5), Some("agent"), Some(EventKind::Set), None, None, true),
-            (Some(3), Some("agent"), Some(EventKind::Reshape), None, None, false),
-            (Some(2), Some("person"), Some(EventKind::Call), Some("label"), None, false),
-            (Some(1), Some("agent"), Some(EventKind::New), None, None, false),
+            "v5 agent set - - current",
+            "v3 agent reshape - - -",
+            "v2 person call label - -",
+            "v1 agent new - - -",
         ]);
         assert!(h.iter().all(|v| v.change.as_ref().is_some_and(|c| c.at_ms > 0)));
         let listed: Value = serde_json::to_value(&h[2]).unwrap();
@@ -2685,7 +2690,7 @@ mod tests {
 
         let mut s = Store::open(dir.path()).unwrap();
         let h = s.history("j").unwrap();
-        assert_eq!(h.iter().map(summary).collect::<Vec<_>>(), [(None, None, None, None, None, true), (None, None, None, None, None, false)]);
+        assert_eq!(h.iter().map(summary).collect::<Vec<_>>(), ["v? ? ? - - current", "v? ? ? - - -"]);
         assert_eq!(serde_json::to_value(&h[0]).unwrap(), json!({"kept": null, "current": true}));
         assert!(s.version("j", 2).is_err());
         s.set_state("j", "/labels/b", Some(json!("y")), "agent").unwrap();

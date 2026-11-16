@@ -73,8 +73,9 @@ local endpoint, including `http://localhost:7878` and equivalent URL spellings;
 other `--url` / `JELLY_URL` targets must already be running.
 
 When upgrading, existing homes keep their stored jelly page, including any
-customizations. To install the bundled dock improvements and responsive stream and
-full-view headers, run this from the updated checkout against your running daemon:
+customizations. To install the bundled dock improvements, responsive stream and
+full-view headers and the History panel, run this from the updated checkout
+against your running daemon:
 
 ```bash
 jelly reshape surface --view assets/surface.html
