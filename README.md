@@ -104,7 +104,9 @@ needs the owner's. A shared jelly syncs one way, local to remote: view, verbs,
 state, assets, moves and removal follow the local jelly after every change, and
 a remote that was unreachable catches up when it is back. Comments, attention
 items, notes, pins and archiving stay on your daemon: they are your conversation
-with your agent. The key for each remote is kept in clear in `remotes.json` under
+with your agent. Design tokens do not travel either: a view that links
+`/p/<project>/design.css` renders without them on the hosted copy, and `jelly see`
+is not served there. The key for each remote is kept in clear in `remotes.json` under
 your daemon's home (mode 0600 on Unix), because the daemon needs it to push.
 
 When upgrading, existing homes keep their stored jelly page, including any

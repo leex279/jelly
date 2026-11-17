@@ -346,8 +346,9 @@ External dependencies and other jellies are not bundled.
 
 A repo's DESIGN.md (github.com/google-labs-code/design.md) becomes CSS variables at
 `/p/<project>/design.css` (`--color-primary`, `--rounded-md`, …). Use it when it
-helps the jelly feel like the product. Do not inline big files as base64; add them
-as assets.
+helps the jelly feel like the product. The tokens stay local: a copy pushed to a
+hosted instance has no `design.css`, so give it fallbacks (`var(--color-primary, #333)`).
+Do not inline big files as base64; add them as assets.
 
 ## Live data
 
