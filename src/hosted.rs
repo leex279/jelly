@@ -29,7 +29,7 @@ pub(crate) fn keys_path(home: &FsPath) -> PathBuf {
 }
 
 pub(crate) fn read_keys(home: &FsPath) -> Result<Vec<KeyRecord>, String> {
-    crate::remote::read_json(&keys_path(home)).map_err(|e| format!("{}: {e}", keys_path(home).display()))
+    crate::remote::read_json(&keys_path(home)).map_err(|e| e.to_string())
 }
 
 fn write_keys(home: &FsPath, keys: &[KeyRecord]) -> Result<(), String> {

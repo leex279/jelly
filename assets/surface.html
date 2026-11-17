@@ -186,7 +186,7 @@
 <div class="app" id="app">
   <div class="top">
     <svg class="logo" id="logo" width="28" height="28" viewBox="0 0 40 40" aria-label="jelly"><defs><radialGradient id="lg" cx="35%" cy="30%"><stop offset="0" stop-color="#ffb3cf"/><stop offset=".55" stop-color="#ff4f8b"/><stop offset="1" stop-color="#d81b60"/></radialGradient></defs><path d="M8 30 C4 22 6 10 20 9 C34 10 36 22 32 30 C29 35 11 35 8 30Z" fill="url(#lg)"/><ellipse cx="15" cy="16" rx="4" ry="2.4" fill="#fff" opacity=".7"/><g class="eyes"><circle cx="16" cy="24" r="1.7" fill="#3b0a1e"/><circle cx="24" cy="24" r="1.7" fill="#3b0a1e"/></g><path class="mouth" d="M18 27.5 Q20 29.3 22 27.5" stroke="#3b0a1e" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg><b class="word">jelly</b><span class="dot" id="live" title="Connected"></span><nav class="projects" id="projects" aria-label="Projects"></nav>
-    <span class="keys"><span><kbd>j</kbd><kbd>k</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>c</kbd> comment</span><span><kbd>p</kbd> pinned</span><span><kbd>a</kbd> attention</span></span>
+    <span class="keys"><span><kbd>j</kbd><kbd>k</kbd> move</span><span><kbd>↵</kbd> open</span><span id="kcomment"><kbd>c</kbd> comment</span><span><kbd>p</kbd> pinned</span><span><kbd>a</kbd> attention</span></span>
   </div>
   <div class="streamwrap">
     <main class="stream" id="stream"><div class="col" id="col"></div></main>
@@ -240,7 +240,7 @@
     label.innerHTML = `<b>${esc(OWNER)}</b>'s jellies`;
     document.querySelector(".top .word").after(label);
   }
-  if (READ_ONLY) for (const id of ["fcomment", "fundo", "fpin", "frm"]) $(id).hidden = true;
+  if (READ_ONLY) for (const id of ["kcomment", "fcomment", "fundo", "fpin", "frm"]) $(id).hidden = true;
 
   function ago(ms) {
     const s = Math.max(0, (Date.now() - ms) / 1000);

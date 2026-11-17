@@ -523,6 +523,7 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
         Cmd::Push { name, to } => {
             let r = send("POST", &api(&format!("/{}/push", id(&name)?)), json!({"to": to, "by": by}))?;
             output(format_args!("{}  (shared; changes here sync to it)\n", r["url"].as_str().unwrap_or("?")))?;
+            if let Some(e) = r["error"].as_str() { eprintln!("jelly: {e}; jelly ls shows the link as behind until it is saved") }
             Ok(())
         }
         Cmd::Unshare { name, rm } => {

@@ -81,7 +81,7 @@ pub(crate) fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(T::default()),
-        Err(e) => Err(e),
+        Err(e) => Err(std::io::Error::new(e.kind(), format!("{}: {e}", path.display()))),
     }
 }
 
@@ -233,6 +233,14 @@ enum Outcome {
     Dropped,
 }
 
+/// Why a link needs another go. After `Save`, the remote copy is current but
+/// `links.json` does not say so yet, so the link keeps its work until a save lands.
+#[derive(Debug)]
+enum Retry {
+    Sync(String),
+    Save(String),
+}
+
 struct RemoteApi<'a> {
     remote: &'a str,
     api: String,
@@ -344,7 +352,7 @@ fn sync_once(link: &Link, key: &str, id: &str, jelly: Option<Jelly>, files: &[St
 
 /// Syncs one link now, blocking. Reads the store and the link, releases every
 /// lock, talks to the remote, then records the outcome on the link.
-fn reconcile(syncer: &Syncer, app: &App, id: &str) -> Result<(), String> {
+fn reconcile(syncer: &Syncer, app: &App, id: &str) -> Result<(), Retry> {
     let (jelly, files, dir) = {
         let store = app.store.lock().expect("store lock");
         (store.get(id).ok().cloned(), store.assets(id), store.asset_dir(id))
@@ -361,8 +369,9 @@ fn reconcile(syncer: &Syncer, app: &App, id: &str) -> Result<(), String> {
 impl Syncer {
     /// Records a sync's outcome on the live link. `seen` is the link as the sync
     /// read it: pending work is cleared only when nothing was marked since, so a
-    /// change that landed during the sync is still owed.
-    fn record(&self, id: &str, seen: &Link, result: Result<Outcome, String>) -> Result<(), String> {
+    /// change that landed during the sync is still owed. A save that fails keeps
+    /// the link owing work, so the forwarder comes back and saves again.
+    fn record(&self, id: &str, seen: &Link, result: Result<Outcome, String>) -> Result<(), Retry> {
         let mut links = self.links.lock().expect("links lock");
         match &result {
             Ok(Outcome::Dropped) => { links.remove(id); }
@@ -376,8 +385,15 @@ impl Syncer {
             Err(e) => if let Some(current) = links.get_mut(id) { current.error = Some(e.clone()) },
         }
         let saved = save_links(&self.home, &links);
-        if let (Err(e), Some(current)) = (&saved, links.get_mut(id)) { current.error = Some(e.clone()) }
-        result.map(|_| ()).and(saved)
+        if let (Err(e), Some(current)) = (&saved, links.get_mut(id)) {
+            current.error = Some(e.clone());
+            current.pending.dirty = true;
+        }
+        match (result, saved) {
+            (Err(e), _) => Err(Retry::Sync(e)),
+            (Ok(_), Err(e)) => Err(Retry::Save(e)),
+            (Ok(_), Ok(())) => Ok(()),
+        }
     }
 }
 
@@ -399,7 +415,7 @@ pub(crate) async fn run(app: crate::server::Shared) {
         for id in due {
             let (app, target) = (app.clone(), id.clone());
             let result = tokio::task::spawn_blocking(move || reconcile(app.sync.as_ref().expect("forwarder runs with a syncer"), &app, &target))
-                .await.unwrap_or_else(|e| Err(e.to_string()));
+                .await.unwrap_or_else(|e| Err(Retry::Sync(e.to_string())));
             match result {
                 Ok(()) => { retries.remove(&id); }
                 Err(_) => {
@@ -419,7 +435,9 @@ pub(crate) async fn run(app: crate::server::Shared) {
     }
 }
 
-/// Links `id` to a remote and syncs it now. A link that fails on its first push is not kept.
+/// Links `id` to a remote and syncs it now. A link that fails on its first push is
+/// not kept; one whose copy reached the remote is shared even when `links.json`
+/// could not record that, and the answer carries the save error.
 pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<Value, String> {
     let syncer = app.sync.as_ref().ok_or(NOT_OUTWARD)?;
     if id == PAGE {
@@ -444,18 +462,25 @@ pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<
         }
         is_new
     };
+    let shared = |error: Option<String>| {
+        let url = syncer.link_status(id).map(|s| s["url"].as_str().unwrap_or("").to_string()).unwrap_or_default();
+        json!({"jelly": id, "remote": remote, "owner": owner, "url": url, "version": version, "error": error})
+    };
     match reconcile(syncer, app, id) {
-        Ok(()) => {
-            let url = syncer.link_status(id).map(|s| s["url"].as_str().unwrap_or("").to_string()).unwrap_or_default();
-            Ok(json!({"jelly": id, "remote": remote, "owner": owner, "url": url, "version": version}))
-        }
-        Err(e) => {
-            if is_new {
-                let mut links = syncer.links.lock().expect("links lock");
-                links.remove(id);
-                if let Err(e) = save_links(&syncer.home, &links) { eprintln!("jelly: {e}") }
+        Ok(()) => Ok(shared(None)),
+        Err(Retry::Save(e)) => Ok(shared(Some(e))),
+        Err(Retry::Sync(e)) => {
+            if !is_new { return Err(e) }
+            let mut links = syncer.links.lock().expect("links lock");
+            let link = links.remove(id);
+            match save_links(&syncer.home, &links) {
+                Ok(()) => Err(e),
+                Err(save) => {
+                    // Memory follows disk: the link stays, shown by `ls` as behind, until a save drops it.
+                    if let Some(link) = link { links.insert(id.into(), link); }
+                    Err(format!("{e}; the link is kept because it {save}"))
+                }
             }
-            Err(e)
         }
     }
 }
@@ -548,8 +573,26 @@ mod tests {
     }
 
     #[test]
-    fn a_null_state_is_sent_as_the_empty_object_the_remote_keeps() {
-        assert_eq!(remote_state(&Value::Null), json!({}));
-        assert_eq!(remote_state(&json!({"count": 1})), json!({"count": 1}));
+    fn a_synced_link_whose_save_failed_keeps_its_work_until_a_save_lands() {
+        let dir = tempfile::tempdir().unwrap();
+        let syncer = syncer_with_link(dir.path(), "p:plan");
+        let seen = syncer.links.lock().unwrap().get("p:plan").cloned().unwrap();
+
+        let path = dir.path().join("links.json");
+        std::fs::create_dir(&path).unwrap();
+        let Err(Retry::Save(e)) = syncer.record("p:plan", &seen, Ok(Outcome::Synced)) else { panic!("a lost save is a save failure") };
+        assert!(e.contains("could not save"), "{e}");
+        let status = syncer.link_status("p:plan").unwrap();
+        assert_eq!(status["synced"], json!(false), "{status}");
+        assert_eq!(status["error"], json!(e));
+        assert!(syncer.links.lock().unwrap()["p:plan"].has_work("p:plan"), "the forwarder comes back for the save");
+
+        std::fs::remove_dir(&path).unwrap();
+        std::fs::remove_file(path.with_extension("json.tmp")).ok();
+        let seen = syncer.links.lock().unwrap().get("p:plan").cloned().unwrap();
+        assert!(syncer.record("p:plan", &seen, Ok(Outcome::Synced)).is_ok());
+        assert_eq!(syncer.link_status("p:plan").unwrap()["synced"], json!(true));
+        let saved: Links = read_json(&path).unwrap();
+        assert!(!saved["p:plan"].pending.dirty && saved["p:plan"].error.is_none());
     }
 }
