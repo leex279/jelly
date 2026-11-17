@@ -68,6 +68,45 @@ For an isolated run: `jelly serve --port 7879 --home /tmp/jelly-test` (PowerShel
 local endpoint, including `http://localhost:7878` and equivalent URL spellings;
 other `--url` / `JELLY_URL` targets must already be running.
 
+### Sharing to a hosted instance
+
+A hosted instance is the same daemon run for several people. Each person pushes
+jellies from their own daemon with their own key; everyone can open them, only the
+owner can change them, and a pushed jelly keeps following the local one.
+
+On the host:
+
+```bash
+jelly serve --hosted --listen 0.0.0.0 --port 7878 --home /srv/jelly
+jelly keys new alice --home /srv/jelly     # prints alice's key once; the file keeps a hash
+jelly keys ls --home /srv/jelly
+jelly keys revoke alice --home /srv/jelly  # takes effect on her next request
+```
+
+The daemon speaks plain HTTP; put TLS in front with a reverse proxy that passes
+WebSocket upgrades through (`/people/<name>/api/ws`). Listening beyond loopback
+without `--hosted` is refused, so an unauthenticated daemon cannot be exposed by
+accident. `--hosted` with the default loopback address is how it runs behind a
+proxy on the same machine.
+
+On your machine:
+
+```bash
+jelly remote add https://jelly.example.org jk_…   # checks the key; prints "alice at https://…"
+jelly push plan                                   # https://jelly.example.org/people/alice/j/archon:plan/
+jelly ls                                          # … shared at https://… (synced | syncing | behind: <why>)
+jelly unshare plan --rm                           # stop syncing; --rm also removes the copy
+```
+
+Each person's jellies live at `/people/<name>/`; ids stay `project:name`, so two
+people can both have `archon:plan`. Reading and opening need no key; every change
+needs the owner's. A shared jelly syncs one way, local to remote: view, verbs,
+state, assets, moves and removal follow the local jelly after every change, and
+a remote that was unreachable catches up when it is back. Comments, attention
+items, notes, pins and archiving stay on your daemon: they are your conversation
+with your agent. The key for each remote is kept in clear in `remotes.json` under
+your daemon's home (mode 0600 on Unix), because the daemon needs it to push.
+
 When upgrading, existing homes keep their stored jelly page, including any
 customizations. To install the bundled dock improvements and responsive stream and
 full-view headers, run this from the updated checkout against your running daemon:
@@ -158,7 +197,10 @@ A local daemon holds every jelly and serves them on 127.0.0.1 only, without
 authentication: anything that can reach the port can run verbs. Verbs run one at a
 time in QuickJS with a 1 second, 64 MB limit and no network, which keeps every
 change attributable and undoable. Live data is pushed in from outside with
-`jelly call`. Contributors: read [`AGENTS.md`](AGENTS.md).
+`jelly call`. A hosted instance (`jelly serve --hosted`) runs one such daemon per
+person under `<home>/people/<name>/`, mounted at `/people/<name>/`, and lets a
+request change something only with that person's key. Contributors: read
+[`AGENTS.md`](AGENTS.md).
 
 Browser snapshots belong to the current served view. The daemon supplies ownership
 evidence in view boot data and the bundled runtime echoes it when posting a

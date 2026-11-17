@@ -25,6 +25,11 @@ verbs), **jelly page** (the internal jelly, id `surface`, that lays out the othe
 - Assets live in `~/.jelly/assets/<id>/`, outside state and undo. On Windows the folder
   is `project+name`, because `:` is not allowed in a file name (`disk::name`). Views are
   served at `/j/<id>/` so `assets/<file>` resolves; keep that trailing slash.
+- A hosted instance (`jelly serve --hosted`) keeps one store per person under
+  `<home>/people/<name>/`; ids stay `project:name` and listings carry `owner`. Reads need
+  no key; every write needs the owner's key. A shared jelly syncs one way, local to
+  remote: the local jelly is the truth, the remote copy is read-only for others, and the
+  link lives in `links.json` beside the jellies, outside state and undo.
 - Never put network access in verbs. Live data is pushed in with `jelly call`.
 
 ## Check

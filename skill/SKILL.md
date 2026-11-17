@@ -326,6 +326,8 @@ jelly dev plan ./plan            # changes the jelly on every save
 jelly asset plan shot.png demo.mp4 model.glb   # beside the jelly; use as assets/shot.png
 jelly design                     # the project's DESIGN.md, if the repo has one
 jelly share plan                 # one read-only HTML file, state and assets baked in
+jelly push plan --to URL         # a live copy on a hosted instance that follows this jelly (key: `jelly remote add URL KEY`)
+jelly unshare plan               # stop syncing it; --rm also removes the copy there
 ```
 
 Shared files include every uploaded asset, including names read from state or
@@ -356,7 +358,9 @@ view can also fetch public APIs itself in the browser.
 ## Limits
 
 A verb runs at most 1 second and has no file, network or process access. The view
-has the full browser. The daemon listens on 127.0.0.1 only and has no login.
+has the full browser. By default the daemon listens on 127.0.0.1 only and has no
+login; a hosted instance (`jelly serve --hosted`) needs the owner's key for every
+change and none for reading.
 
 If deleting a saved jelly file fails during `jelly rm` or `jelly move`, the old
 jelly can reappear after a daemon restart. Saved files and recorded history
