@@ -2,6 +2,8 @@
 
 mod design;
 mod disk;
+mod hosted;
+mod remote;
 mod server;
 mod store;
 mod startup;
@@ -40,6 +42,39 @@ enum Cmd {
         /// Where jellies are kept. Defaults to $JELLY_HOME or ~/.jelly.
         #[arg(long)]
         home: Option<PathBuf>,
+        /// The address to listen on. Anything but loopback needs --hosted.
+        #[arg(long, default_value = "127.0.0.1")]
+        listen: std::net::IpAddr,
+        /// Run a hosted instance: one store per person under <home>/people/, reads
+        /// without a key, every change with the owner's key (`jelly keys new`).
+        #[arg(long)]
+        hosted: bool,
+    },
+    /// Manage the API keys of a hosted instance, on the machine that runs it.
+    Keys {
+        #[command(subcommand)]
+        action: KeysAction,
+        /// The hosted instance's home. Defaults to $JELLY_HOME or ~/.jelly.
+        #[arg(long, global = true)]
+        home: Option<PathBuf>,
+    },
+    /// The hosted instances this daemon can push to, each with your key there.
+    Remote {
+        #[command(subcommand)]
+        action: RemoteAction,
+    },
+    /// Share a jelly on a hosted instance and keep its copy following this one.
+    Push {
+        name: String,
+        /// The remote's URL. Needed when more than one is configured.
+        #[arg(long)]
+        to: Option<String>,
+    },
+    /// Stop syncing a jelly to its remote; with --rm also remove the copy there.
+    Unshare {
+        name: String,
+        #[arg(long)]
+        rm: bool,
     },
     /// List this project's jellies, one per line (all projects outside a repo).
     Ls {
@@ -309,6 +344,24 @@ enum Cmd {
 }
 
 
+#[derive(Subcommand)]
+enum KeysAction {
+    /// Issue a key for a person. It is printed once and stored only as a hash.
+    New { name: String },
+    /// List who has a key.
+    Ls,
+    /// Revoke a person's key. Takes effect on their next request.
+    Revoke { name: String },
+}
+
+#[derive(Subcommand)]
+enum RemoteAction {
+    /// Remember a hosted instance and your key there; the key is checked first.
+    Add { remote: String, key: String },
+    Ls,
+    Rm { remote: String },
+}
+
 #[derive(Clone, Debug)]
 struct SequenceToken(u64);
 
@@ -379,7 +432,7 @@ fn run(cli: Cli) -> Result<(), CommandError> {
 }
 
 fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), String>) -> Result<(), CommandError> {
-    if !matches!(cli.cmd, Cmd::Serve { .. }) && startup::is_default_endpoint(&cli.url) {
+    if !matches!(cli.cmd, Cmd::Serve { .. } | Cmd::Keys { .. }) && startup::is_default_endpoint(&cli.url) {
         cli.url = startup::DEFAULT_URL.into();
         let quiet = matches!(cli.cmd, Cmd::Inbox { hook: true, .. });
         if let Err(e) = start(&cli.url, quiet) {
@@ -401,18 +454,87 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
             .filter_map(|j| j["name"].as_str())))
     };
     match cli.cmd {
-        Cmd::Serve { port, home } => {
-            let home = home
-                .or_else(|| std::env::var_os("JELLY_HOME").map(PathBuf::from))
-                .or_else(|| std::env::home_dir().map(|h| h.join(".jelly")))
-                .ok_or("could not find your home directory: set --home or JELLY_HOME")?;
+        Cmd::Serve { port, home, listen, hosted } => {
+            if !listen.is_loopback() && !hosted {
+                return Err(format!("listening on {listen} would let anyone run verbs; add --hosted so every change needs a key").into());
+            }
+            let home = home_dir(home)?;
             let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
             rt.block_on(async {
                 // Reserve the endpoint before store initialization can write anything.
-                let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| e.to_string())?;
+                let listener = tokio::net::TcpListener::bind((listen, port)).await.map_err(|e| e.to_string())?;
+                if hosted {
+                    eprintln!("jelly on http://{listen}:{port} (hosted)");
+                    return hosted::serve_hosted(home, listener).await.map_err(|e| e.to_string().into());
+                }
                 let store = store::Store::open(&home).map_err(|e| format!("{}: {e}", home.display()))?;
                 server::serve(store, listener).await.map_err(|e| e.to_string().into())
             })
+        }
+        Cmd::Keys { action, home } => {
+            let home = home_dir(home)?;
+            match action {
+                KeysAction::New { name } => {
+                    let key = hosted::issue(&home, &name)?;
+                    output(format_args!("{key}\n"))?;
+                    eprintln!("jelly: {name}'s key, shown once; only its hash is kept in {}", hosted::keys_path(&home).display());
+                    Ok(())
+                }
+                KeysAction::Ls => {
+                    let keys = hosted::read_keys(&home)?;
+                    if keys.is_empty() {
+                        output(format_args!("No keys in {}. Issue one with jelly keys new NAME\n", hosted::keys_path(&home).display()))?;
+                    }
+                    for k in keys {
+                        output(format_args!("{}\n", k.name))?;
+                    }
+                    Ok(())
+                }
+                KeysAction::Revoke { name } => {
+                    hosted::revoke(&home, &name)?;
+                    output(format_args!("{name}: key revoked\n"))?;
+                    Ok(())
+                }
+            }
+        }
+        Cmd::Remote { action } => match action {
+            RemoteAction::Add { remote, key } => {
+                let r = send("POST", &format!("{}/api/remotes", cli.url), json!({"url": remote, "key": key}))?;
+                output(format_args!("{} at {}\n", r["owner"].as_str().unwrap_or("?"), r["url"].as_str().unwrap_or(&remote)))?;
+                Ok(())
+            }
+            RemoteAction::Ls => {
+                let list = get(&format!("{}/api/remotes", cli.url))?;
+                let items = list.as_array().cloned().unwrap_or_default();
+                if items.is_empty() {
+                    output(format_args!("No remotes. Add one with jelly remote add URL KEY\n"))?;
+                }
+                for r in items {
+                    output(format_args!("{}  as {}\n", r["url"].as_str().unwrap_or("?"), r["owner"].as_str().unwrap_or("?")))?;
+                }
+                Ok(())
+            }
+            RemoteAction::Rm { remote } => {
+                send("POST", &format!("{}/api/remotes/remove", cli.url), json!({"url": remote}))?;
+                output(format_args!("{remote}: forgotten\n"))?;
+                Ok(())
+            }
+        },
+        Cmd::Push { name, to } => {
+            let r = send("POST", &api(&format!("/{}/push", id(&name)?)), json!({"to": to, "by": by}))?;
+            output(format_args!("{}  (shared; changes here sync to it)\n", r["url"].as_str().unwrap_or("?")))?;
+            if let Some(e) = r["error"].as_str() { eprintln!("jelly: {e}; jelly ls shows the link as behind until it is saved") }
+            Ok(())
+        }
+        Cmd::Unshare { name, rm } => {
+            let r = send("POST", &api(&format!("/{}/unshare", id(&name)?)), json!({"remove": rm, "by": by}))?;
+            let jelly = r["jelly"].as_str().unwrap_or(&name);
+            if rm {
+                output(format_args!("{jelly}: removed from {}\n", r["remote"].as_str().unwrap_or("?")))?;
+            } else {
+                output(format_args!("{jelly}: no longer shared\n"))?;
+            }
+            Ok(())
         }
         Cmd::Ls { all, json } => {
             let p = if all { String::new() } else { project() };
@@ -433,6 +555,15 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
                 if n("open_comments") > 0 { tags.push(format!("{} open comments", n("open_comments"))); }
                 if j["pinned"].as_bool() == Some(true) { tags.push("pinned".into()); }
                 if j["archived"].as_bool() == Some(true) { tags.push("archived".into()); }
+                if let Some(owner) = j["owner"].as_str() { tags.push(format!("by {owner}")); }
+                if let Some(link) = j["link"].as_object() {
+                    let state = match (link["synced"].as_bool(), link["error"].as_str()) {
+                        (Some(true), _) => "synced".to_string(),
+                        (_, Some(e)) => format!("behind: {e}"),
+                        _ => "syncing".to_string(),
+                    };
+                    tags.push(format!("shared at {} ({state})", link["url"].as_str().unwrap_or("?")));
+                }
                 output(format_args!("{}  {}  ({})\n", j["name"].as_str().unwrap_or("?"), j["about"].as_str().unwrap_or(""), tags.join(", ")))?;
             }
             Ok(())
@@ -776,6 +907,14 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
     }
 }
 
+/// `--home`, else `$JELLY_HOME`, else `~/.jelly`.
+fn home_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
+    given
+        .or_else(|| std::env::var_os("JELLY_HOME").map(PathBuf::from))
+        .or_else(|| std::env::home_dir().map(|h| h.join(".jelly")))
+        .ok_or_else(|| "could not find your home directory: set --home or JELLY_HOME".into())
+}
+
 fn open_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = std::process::Command::new("open");
@@ -1104,7 +1243,7 @@ fn print(v: Value) -> Result<(), CommandError> {
 }
 
 /// Percent-encodes a query value.
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
@@ -1160,6 +1299,9 @@ mod tests {
         assert!(run_with_start(cli, |_, _| panic!("serve must bypass startup")).is_err());
         let cli = parse(&["jelly", "--url", "http://127.0.0.1:9999", "--project", "", "inbox", "--hook"]);
         assert!(run_with_start(cli, |_, _| panic!("custom URL must bypass startup")).is_ok());
+        let keys_home = tempfile::tempdir().unwrap();
+        let cli = parse(&["jelly", "--url", super::startup::DEFAULT_URL, "keys", "ls", "--home", keys_home.path().to_str().unwrap()]);
+        assert!(run_with_start(cli, |_, _| panic!("keys must bypass startup")).is_ok());
     }
 
     #[test]

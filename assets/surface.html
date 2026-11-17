@@ -45,6 +45,7 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dark-faint); }
   .dot.live { background: var(--accent); box-shadow: 0 0 0 3px var(--brand-glow); }
   .top .count { color: var(--dark-faint); font-size: 12px; }
+  .top .owner { color: var(--dark-faint); font-size: 13px; }
   .projects { display: flex; gap: 2px; margin-left: 10px; overflow-x: auto; min-width: 0; }
   .projects a { color: var(--bar-muted); text-decoration: none; font-size: 12.5px; padding: 4px 10px; border-radius: 7px; white-space: nowrap; }
   .projects a:hover { color: var(--bar-ink); background: var(--brand-soft); }
@@ -185,7 +186,7 @@
 <div class="app" id="app">
   <div class="top">
     <svg class="logo" id="logo" width="28" height="28" viewBox="0 0 40 40" aria-label="jelly"><defs><radialGradient id="lg" cx="35%" cy="30%"><stop offset="0" stop-color="#ffb3cf"/><stop offset=".55" stop-color="#ff4f8b"/><stop offset="1" stop-color="#d81b60"/></radialGradient></defs><path d="M8 30 C4 22 6 10 20 9 C34 10 36 22 32 30 C29 35 11 35 8 30Z" fill="url(#lg)"/><ellipse cx="15" cy="16" rx="4" ry="2.4" fill="#fff" opacity=".7"/><g class="eyes"><circle cx="16" cy="24" r="1.7" fill="#3b0a1e"/><circle cx="24" cy="24" r="1.7" fill="#3b0a1e"/></g><path class="mouth" d="M18 27.5 Q20 29.3 22 27.5" stroke="#3b0a1e" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg><b class="word">jelly</b><span class="dot" id="live" title="Connected"></span><nav class="projects" id="projects" aria-label="Projects"></nav>
-    <span class="keys"><span><kbd>j</kbd><kbd>k</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>c</kbd> comment</span><span><kbd>p</kbd> pinned</span><span><kbd>a</kbd> attention</span></span>
+    <span class="keys"><span><kbd>j</kbd><kbd>k</kbd> move</span><span><kbd>↵</kbd> open</span><span id="kcomment"><kbd>c</kbd> comment</span><span><kbd>p</kbd> pinned</span><span><kbd>a</kbd> attention</span></span>
   </div>
   <div class="streamwrap">
     <main class="stream" id="stream"><div class="col" id="col"></div></main>
@@ -223,9 +224,23 @@
   const lastEvent = new Map(); // name -> {text, by, at}
   let sel = null, full = null, booted = false;
   let archived = [], showArchived = false; // jellies hidden after a quiet week
+  // On a hosted instance this page sits under its owner's prefix; locally BASE is "".
+  const BASE = window.__JELLY__.base || "";
+  const OWNER = window.__JELLY__.owner || "";
+  // A visitor to someone's hosted jellies can look and open; only the owner's own daemon changes them.
+  const READ_ONLY = !!window.__JELLY__.readOnly;
   // /p/<project> is this same page showing one project's jellies; / shows all.
-  const PROJECT = location.pathname.startsWith("/p/") ? decodeURIComponent(location.pathname.slice(3)) : null;
+  const PAGE_PATH = location.pathname.slice(BASE.length);
+  const PROJECT = PAGE_PATH.startsWith("/p/") ? decodeURIComponent(PAGE_PATH.slice(3)) : null;
   if (PROJECT) document.title = `${PROJECT} · jelly`;
+  if (OWNER) {
+    document.title = `${OWNER} · jelly`;
+    const label = document.createElement("span");
+    label.className = "owner";
+    label.innerHTML = `<b>${esc(OWNER)}</b>'s jellies`;
+    document.querySelector(".top .word").after(label);
+  }
+  if (READ_ONLY) for (const id of ["kcomment", "fcomment", "fundo", "fpin", "frm"]) $(id).hidden = true;
 
   function ago(ms) {
     const s = Math.max(0, (Date.now() - ms) / 1000);
@@ -286,10 +301,9 @@
         ${last ? `<span class="last">· ${esc(who(last.by))} ${esc(last.text)} ${ago(last.at)}</span>` : ""}</div>
       <h2>${esc(j.about || j.name)}</h2>
       <div class="acts">
-        <button class="btn" data-act="comment">Comment</button>
+        ${READ_ONLY ? "" : '<button class="btn" data-act="comment">Comment</button>'}
         <button class="btn quiet" data-act="open" title="Open full size (↵)">Open</button>
-        <button class="btn quiet" data-act="pin" title="Keep it pinned beside the stream">Pin</button>
-        <button class="btn quiet" data-act="rm">Remove</button>
+        ${READ_ONLY ? "" : '<button class="btn quiet" data-act="pin" title="Keep it pinned beside the stream">Pin</button><button class="btn quiet" data-act="rm">Remove</button>'}
       </div>`;
   }
 
@@ -300,7 +314,7 @@
     a.innerHTML = `<header></header><div class="frame"></div>`;
     a.querySelector("header").innerHTML = entryHead(j);
     const f = document.createElement("iframe");
-    f.src = `/j/${enc(j.name)}/`;
+    f.src = `${BASE}/j/${enc(j.name)}/`;
     f.title = j.name;
     autosize(f);
     a.querySelector(".frame").appendChild(f);
@@ -514,8 +528,8 @@
         t.dataset.name = j.name;
         // A jelly's poster (assets/poster.*) stands in for the live thumbnail when it has one.
         t.innerHTML = j.poster
-          ? `<div class="thumb"><img alt="" src="/j/${enc(j.name)}/assets/${enc(j.poster)}" style="width:100%;height:100%;object-fit:cover;object-position:top"></div><div class="cap"></div>`
-          : `<div class="thumb"><iframe tabindex="-1" src="/j/${enc(j.name)}/"></iframe></div><div class="cap"></div>`;
+          ? `<div class="thumb"><img alt="" src="${BASE}/j/${enc(j.name)}/assets/${enc(j.poster)}" style="width:100%;height:100%;object-fit:cover;object-position:top"></div><div class="cap"></div>`
+          : `<div class="thumb"><iframe tabindex="-1" src="${BASE}/j/${enc(j.name)}/"></iframe></div><div class="cap"></div>`;
         tiles.set(j.name, t);
       }
       t.querySelector(".cap").innerHTML = `<b>${esc(short(j.name))}<span class="n">${j.replies_waiting ? "reply for you" : j.open_comments ? j.open_comments + " open" : ""}</span></b><div>${esc(j.about)}</div>`;
@@ -536,6 +550,7 @@
   // Older local focus echoes must not replace a more recent frame.
   let focusWrites = Promise.resolve(), pendingFocusWrites = 0;
   function writeFocus(name) {
+    if (READ_ONLY) return;
     pendingFocusWrites++;
     focusWrites = focusWrites.then(() => jelly.call("focus", { name })).catch((err) => alert("Could not save your view selection. Try the action again.\n" + err.message)).finally(() => {
       pendingFocusWrites--;
@@ -549,7 +564,7 @@
       full = name;
       $("full").querySelector("iframe")?.remove();
       const f = document.createElement("iframe");
-      f.src = `/j/${enc(name)}/`;
+      f.src = `${BASE}/j/${enc(name)}/`;
       f.title = name;
       $("full").appendChild(f);
     }
@@ -586,6 +601,7 @@
   const frameOf = (name) => (full ? $("full").querySelector("iframe") : entries.get(name)?.querySelector("iframe"));
   const buttonOf = (name) => (full ? $("fcomment") : entries.get(name)?.querySelector('[data-act="comment"]'));
   function toggleComment(name) {
+    if (READ_ONLY) return;
     const f = frameOf(name), b = buttonOf(name);
     if (!f || !b) return;
     const on = !b.classList.contains("on");
@@ -604,15 +620,16 @@
   // ---- actions --------------------------------------------------------------
 
   async function act(path, body, method = "POST") {
+    if (READ_ONLY) return alert(`Only ${OWNER} can change this. It is a shared copy of ${OWNER}'s jelly.`);
     const r = await fetch(path, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify({ ...body, by: "person" }) });
     if (!r.ok) alert((await r.json()).error);
   }
-  const pin = (name) => act(`/api/jellies/${enc(name)}/pin`, { pinned: !byName(name).pinned });
-  const remove = (name) => { if (confirm(`Remove ${name} and its history?`)) act(`/api/jellies/${enc(name)}?by=person`, null, "DELETE"); };
+  const pin = (name) => act(`${BASE}/api/jellies/${enc(name)}/pin`, { pinned: !byName(name).pinned });
+  const remove = (name) => { if (confirm(`Remove ${name} and its history?`)) act(`${BASE}/api/jellies/${enc(name)}?by=person`, null, "DELETE"); };
 
   $("col").addEventListener("click", (e) => {
     const r = e.target.closest("[data-restore]");
-    if (r) return act(`/api/jellies/${enc(r.dataset.restore)}/restore`, {});
+    if (r) return act(`${BASE}/api/jellies/${enc(r.dataset.restore)}/restore`, {});
     if (e.target.closest("[data-toggle-arch]")) { showArchived = !showArchived; return renderStream(); }
     const name = e.target.closest(".entry")?.dataset.name;
     if (!name) return;
@@ -628,7 +645,7 @@
   });
   $("back").onclick = () => closeFull();
   $("fcomment").onclick = () => toggleComment(full);
-  $("fundo").onclick = () => act(`/api/jellies/${enc(full)}/undo`, {});
+  $("fundo").onclick = () => act(`${BASE}/api/jellies/${enc(full)}/undo`, {});
   $("fpin").onclick = () => pin(full);
   $("frm").onclick = () => remove(full);
   $("stream").addEventListener("scroll", () => {
@@ -668,19 +685,19 @@
     const counts = {};
     for (const j of all) if (j.project) counts[j.project] = (counts[j.project] || 0) + 1;
     const link = (href, label, n, on) => `<a href="${href}" class="${on ? "on" : ""}">${esc(label)}<span>${n}</span></a>`;
-    $("projects").innerHTML = link("/", "All", all.length, !PROJECT)
-      + Object.keys(counts).sort().map((p) => link(`/p/${enc(p)}`, p, counts[p], p === PROJECT)).join("")
-      + (PROJECT && !counts[PROJECT] ? link(`/p/${enc(PROJECT)}`, PROJECT, 0, true) : "");
+    $("projects").innerHTML = link(`${BASE}/`, "All", all.length, !PROJECT)
+      + Object.keys(counts).sort().map((p) => link(`${BASE}/p/${enc(p)}`, p, counts[p], p === PROJECT)).join("")
+      + (PROJECT && !counts[PROJECT] ? link(`${BASE}/p/${enc(PROJECT)}`, PROJECT, 0, true) : "");
   }
 
   async function refresh() {
-    const all = (await (await fetch("/api/jellies")).json()).filter((j) => j.name !== "surface");
+    const all = (await (await fetch(`${BASE}/api/jellies`)).json()).filter((j) => j.name !== "surface");
     const live = all.filter((j) => !j.archived);
     const scope = (list) => (PROJECT ? list.filter((j) => j.project === PROJECT) : list);
     jellies = scope(live);
     archived = scope(all.filter((j) => j.archived));
     renderProjects(live);
-    attentionItems = await (await fetch(`/api/attention?project=${enc(PROJECT || "")}`)).json();
+    attentionItems = await (await fetch(`${BASE}/api/attention?project=${enc(PROJECT || "")}`)).json();
     renderStream();
     renderBoard();
     if (full) renderFull();

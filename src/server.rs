@@ -30,15 +30,25 @@ const ASK_VIEW: &str = include_str!("../assets/ask.html");
 const ASK_VERBS: &str = include_str!("../assets/ask.verbs.js");
 const ARCHIVE_AFTER_MS: u64 = 7 * 24 * 3600 * 1000;
 
-struct App {
-    store: Mutex<Store>,
+pub(crate) struct App {
+    pub(crate) store: Mutex<Store>,
     events: broadcast::Sender<Event>,
     /// What some browser last showed of each jelly, as text. Memory only.
     screens: Mutex<std::collections::HashMap<String, ViewScreen>>,
+    /// The URL prefix every page and the runtime use: "" locally, `/people/<name>` hosted.
+    base: String,
+    /// Whose daemon this is on a hosted instance; "" locally.
+    owner: String,
+    /// Keeps shared jellies' remote copies following them. Only the local daemon has one.
+    pub(crate) sync: Option<crate::remote::Syncer>,
 }
-type Shared = Arc<App>;
+pub(crate) type Shared = Arc<App>;
 
 impl App {
+    pub(crate) fn new(store: Store, events: broadcast::Sender<Event>, base: &str, owner: &str, sync: Option<crate::remote::Syncer>) -> App {
+        App { store: Mutex::new(store), events, screens: Mutex::default(), base: base.into(), owner: owner.into(), sync }
+    }
+
     /// Broadcasts committed batch events even when a later change fails.
     fn change_many(&self, f: impl FnOnce(&mut Store) -> Result<Vec<Event>, crate::store::BatchError>) -> Result<Json<Value>, ApiError> {
         let mut store = self.store.lock().expect("store lock");
@@ -50,6 +60,9 @@ impl App {
         self.invalidate_screens(&store, &evs);
         for ev in &evs {
             let _ = self.events.send(ev.clone());
+        }
+        if let Some(sync) = &self.sync {
+            sync.observe(&evs);
         }
         if let Some(error) = error {
             if let Some(last) = evs.last() {
@@ -67,6 +80,9 @@ impl App {
         let ev = f(&mut store)?;
         self.invalidate_screens(&store, std::slice::from_ref(&ev));
         let _ = self.events.send(ev.clone());
+        if let Some(sync) = &self.sync {
+            sync.observe(std::slice::from_ref(&ev));
+        }
         Ok(Json(ev))
     }
 
@@ -120,16 +136,24 @@ impl App {
     }
 }
 
-pub async fn serve(store: Store, listener: tokio::net::TcpListener) -> std::io::Result<()> {
-    let mut store = store;
+/// Gives a fresh store its jelly page.
+pub(crate) fn boot_store(store: &mut Store) -> std::io::Result<()> {
     if store.get(PAGE).is_err() {
         store
             .create(PAGE, SURFACE_VIEW.into(), SURFACE_VERBS.into(), json!({}), "jelly", false, "The jelly page", "")
             .and_then(|_| store.pin(PAGE, true, "jelly"))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
     }
+    Ok(())
+}
+
+pub async fn serve(store: Store, listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    let mut store = store;
+    boot_store(&mut store)?;
+    let sync = crate::remote::Syncer::open(store.home())?;
     let (tx, _) = broadcast::channel(1024);
-    let app: Shared = Arc::new(App { store: Mutex::new(store), events: tx, screens: Mutex::default() });
+    let app: Shared = Arc::new(App::new(store, tx, "", "", Some(sync)));
+    tokio::spawn(crate::remote::run(app.clone()));
 
     // Unpinned jellies nobody touched for a week are archived: hidden from the
     // jelly page, restorable, and back on their own as soon as anything changes them.
@@ -144,18 +168,27 @@ pub async fn serve(store: Store, listener: tokio::net::TcpListener) -> std::io::
         }
     });
 
-    let port = listener.local_addr()?.port();
-    eprintln!("jelly on http://127.0.0.1:{port}");
+    let addr = listener.local_addr()?;
+    eprintln!("jelly on http://{}:{}", addr.ip(), addr.port());
     axum::serve(listener, router(app)).await
 }
 
-fn router(app: Shared) -> Router {
-    Router::new()
+pub(crate) fn router(app: Shared) -> Router {
+    // `jelly see` starts a browser on this machine and writes screenshots under the
+    // home, so it exists only on a local daemon, never under a hosted person's prefix.
+    let local_only = if app.owner.is_empty() {
+        Router::new()
+            .route("/api/jellies/{name}/see", get(see))
+            .route("/see-frame/{name}", get(see_frame))
+    } else {
+        Router::new()
+    };
+    local_only
         // The jelly page: every project at /, one project at /p/<project>.
         .route("/", get(|st: State<Shared>| async move { view(st, Path(PAGE.into())).await }))
         .route("/runtime.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], RUNTIME_JS) }))
         // Views live at /j/<name>/ so a view can use relative `assets/<file>` paths.
-        .route("/j/{name}", get(|Path(name): Path<String>| async move { Redirect::permanent(&format!("/j/{name}/")) }))
+        .route("/j/{name}", get(|State(app): State<Shared>, Path(name): Path<String>| async move { Redirect::permanent(&format!("{}/j/{name}/", app.base)) }))
         .route("/j/{name}/", get(view))
         .route("/j/{name}/assets/{file}", get(asset))
         // A project's page is the same page, showing only that project's jellies.
@@ -177,12 +210,14 @@ fn router(app: Shared) -> Router {
         .route("/api/jellies/{name}/assets", get(list_assets))
         .route("/api/jellies/{name}/assets/{file}", post(put_asset).layer(DefaultBodyLimit::max(25 * 1024 * 1024)))
         .route("/api/jellies/{name}/share", get(share))
+        .route("/api/jellies/{name}/push", post(push))
+        .route("/api/jellies/{name}/unshare", post(unshare))
+        .route("/api/remotes", get(remotes).post(add_remote))
+        .route("/api/remotes/remove", post(remove_remote))
         .route("/api/inbox", get(inbox).post(read_inbox))
         .route("/api/inbox/commit", post(commit_inbox))
         .route("/api/jellies/{name}/screen", post(put_screen))
         .route("/api/jellies/{name}/note", post(note))
-        .route("/api/jellies/{name}/see", get(see))
-        .route("/see-frame/{name}", get(see_frame))
         .route("/api/projects/{project}/design", get(get_design).put(put_design))
         .route("/p/{project}/DESIGN.md", get(get_design))
         .route("/p/{project}/design.css", get(design_css))
@@ -238,10 +273,10 @@ fn by(by: Option<String>) -> Result<String, Error> {
     by.filter(|b| !b.trim().is_empty()).ok_or_else(|| Error::Invalid("say who is making this change: by".into()))
 }
 
-async fn list(State(app): State<Shared>) -> Json<Value> {
-    let store = app.store.lock().expect("store lock");
+/// One line per jelly, as `jelly ls` and the jelly page show them.
+pub(crate) fn listing(store: &Store) -> Vec<Value> {
     // The page that shows the jellies is internal; it is not one of yours.
-    Json(json!(store
+    store
         .list()
         .filter(|j| j.name != PAGE)
         .map(|j| json!({
@@ -254,7 +289,75 @@ async fn list(State(app): State<Shared>) -> Json<Value> {
             "working": j.working,
             "poster": store.assets(&j.name).into_iter().find(|f| f.starts_with("poster.")),
         }))
-        .collect::<Vec<_>>()))
+        .collect()
+}
+
+async fn list(State(app): State<Shared>) -> Json<Value> {
+    let store = app.store.lock().expect("store lock");
+    let mut items = listing(&store);
+    if let Some(sync) = &app.sync {
+        for item in &mut items {
+            let id = item["name"].as_str().unwrap_or("");
+            item["link"] = sync.link_status(id).unwrap_or(Value::Null);
+        }
+    }
+    Json(json!(items))
+}
+
+#[derive(Deserialize)]
+struct PushReq {
+    to: Option<String>,
+    by: Option<String>,
+}
+
+fn outward(e: String) -> ApiError {
+    Error::Invalid(e).into()
+}
+
+/// The network work of sharing runs off the async threads and never under the store lock.
+async fn outward_call(app: Shared, f: impl FnOnce(&App) -> Result<Value, String> + Send + 'static) -> Result<Json<Value>, ApiError> {
+    tokio::task::spawn_blocking(move || f(&app)).await
+        .map_err(|e| ApiError::Internal(e.to_string()))?
+        .map(Json).map_err(outward)
+}
+
+async fn push(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<PushReq>) -> Result<Json<Value>, ApiError> {
+    let by = by(r.by)?;
+    outward_call(app, move |app| crate::remote::push(app, &name, r.to, &by)).await
+}
+
+#[derive(Deserialize)]
+struct UnshareReq {
+    #[serde(default)]
+    remove: bool,
+    by: Option<String>,
+}
+
+async fn unshare(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<UnshareReq>) -> Result<Json<Value>, ApiError> {
+    let by = by(r.by)?;
+    outward_call(app, move |app| crate::remote::unshare(app, &name, r.remove, &by)).await
+}
+
+async fn remotes(State(app): State<Shared>) -> Result<Json<Value>, ApiError> {
+    crate::remote::remotes(&app).map(Json).map_err(outward)
+}
+
+#[derive(Deserialize)]
+struct RemoteReq {
+    url: String,
+    #[serde(default)]
+    key: String,
+}
+
+async fn add_remote(State(app): State<Shared>, Json(r): Json<RemoteReq>) -> Result<Json<Value>, ApiError> {
+    if r.key.trim().is_empty() {
+        return Err(Error::Invalid("give the key the remote issued: jelly remote add URL KEY".into()).into());
+    }
+    outward_call(app, move |app| crate::remote::add_remote(app, &r.url, r.key.trim())).await
+}
+
+async fn remove_remote(State(app): State<Shared>, Json(r): Json<RemoteReq>) -> Result<Json<Value>, ApiError> {
+    crate::remote::remove_remote(&app, &r.url).map(Json).map_err(outward)
 }
 
 async fn show(State(app): State<Shared>, Path(name): Path<String>) -> Result<Json<Value>, ApiError> {
@@ -275,20 +378,20 @@ async fn state(State(app): State<Shared>, Path(name): Path<String>, Query(q): Qu
     }
 }
 
-#[derive(Deserialize)]
-struct CreateReq {
-    name: String,
-    view: String,
-    verbs: String,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CreateReq {
+    pub(crate) name: String,
+    pub(crate) view: String,
+    pub(crate) verbs: String,
     #[serde(default)]
-    state: Value,
-    by: Option<String>,
+    pub(crate) state: Value,
+    pub(crate) by: Option<String>,
     #[serde(default)]
-    replace: bool,
+    pub(crate) replace: bool,
     #[serde(default)]
-    about: String,
+    pub(crate) about: String,
     #[serde(default)]
-    project: String,
+    pub(crate) project: String,
 }
 
 async fn create(State(app): State<Shared>, Json(r): Json<CreateReq>) -> Result<Json<Event>, ApiError> {
@@ -311,15 +414,15 @@ async fn call(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json
     app.change(|s| s.call_from(&name, &r.verb, r.args, &by(r.by)?, r.source))
 }
 
-#[derive(Deserialize)]
-struct SetReq {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SetReq {
     #[serde(default)]
-    pointer: String,
+    pub(crate) pointer: String,
     #[serde(default)]
-    value: Option<Value>,
+    pub(crate) value: Option<Value>,
     #[serde(default)]
-    remove: bool,
-    by: Option<String>,
+    pub(crate) remove: bool,
+    pub(crate) by: Option<String>,
 }
 
 async fn set_state(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<SetReq>) -> Result<Json<Event>, ApiError> {
@@ -331,12 +434,12 @@ async fn set_state(State(app): State<Shared>, Path(name): Path<String>, Json(r):
     app.change(|s| s.set_state(&name, &r.pointer, value, &by(r.by)?))
 }
 
-#[derive(Deserialize)]
-struct ReshapeReq {
-    view: Option<String>,
-    verbs: Option<String>,
-    about: Option<String>,
-    by: Option<String>,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ReshapeReq {
+    pub(crate) view: Option<String>,
+    pub(crate) verbs: Option<String>,
+    pub(crate) about: Option<String>,
+    pub(crate) by: Option<String>,
 }
 
 async fn reshape(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<ReshapeReq>) -> Result<Json<Event>, ApiError> {
@@ -393,10 +496,10 @@ async fn reply(State(app): State<Shared>, Path(name): Path<String>, Json(r): Jso
     app.change(|s| s.reply(&name, &r.id, &r.text, &by(r.by)?, r.resolve))
 }
 
-#[derive(Deserialize)]
-struct ProjectReq {
-    project: String,
-    by: Option<String>,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ProjectReq {
+    pub(crate) project: String,
+    pub(crate) by: Option<String>,
 }
 
 async fn move_project(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<ProjectReq>) -> Result<Json<Event>, ApiError> {
@@ -586,10 +689,11 @@ async fn view(State(app): State<Shared>, Path(name): Path<String>) -> Result<Htm
     let store = app.store.lock().expect("store lock");
     let j = store.get(&name)?;
     let owner = app.snapshot_owner(&name, j.view_rev)?;
-    let boot = json!({"snapshotOwner": owner, "name": j.name, "about": j.about, "version": j.version, "viewRev": j.view_rev, "state": j.state, "comments": j.comments, "attention": j.attention, "working": j.working});
+    let boot = json!({"snapshotOwner": owner, "name": j.name, "about": j.about, "version": j.version, "viewRev": j.view_rev, "state": j.state, "comments": j.comments, "attention": j.attention, "working": j.working,
+        "base": app.base, "owner": app.owner, "readOnly": !app.owner.is_empty()});
     // `</` cannot appear inside the script, or state text could close the tag.
     let boot = boot.to_string().replace("</", "<\\/");
-    let inject = format!("<script>window.__JELLY__={boot};</script><script src=\"/runtime.js\"></script>");
+    let inject = format!("<script>window.__JELLY__={boot};</script><script src=\"{}/runtime.js\"></script>", app.base);
     Ok(Html(inject_head(&j.view, &inject)))
 }
 
@@ -1409,7 +1513,7 @@ mod share_tests {
         store.answer("test:share", "a2", None, "captured answer", PERSON).unwrap();
         store.withdraw("test:share", "a3", "agent").unwrap();
         let (events, _) = broadcast::channel(16);
-        (dir, Arc::new(App { store: Mutex::new(store), events, screens: Mutex::default() }))
+        (dir, Arc::new(App::new(store, events, "", "", None)))
     }
 
     async fn exported(app: Shared) -> String {
@@ -1653,7 +1757,7 @@ mod wait_tests {
             store.create(name, "".into(), "const verbs = {};".into(), json!({}), "agent", false, "", "").unwrap();
         }
         let (events, _) = broadcast::channel(capacity);
-        (dir, App { store: Mutex::new(store), events, screens: Mutex::default() })
+        (dir, App::new(store, events, "", "", None))
     }
 
     fn query(jelly: Option<&str>, since: u64) -> WaitQ {
@@ -1671,7 +1775,7 @@ mod wait_tests {
             let store = Store::open(dir.path()).unwrap();
             let path = store.events_path();
             let (events, _) = broadcast::channel(1);
-            let app = App { store: Mutex::new(store), events, screens: Mutex::default() };
+            let app = App::new(store, events, "", "", None);
             let q = WaitQ { timeout: Some(1), ..query(None, since) };
             let waiting = wait_since(&app, &q);
             tokio::pin!(waiting);
@@ -1972,7 +2076,7 @@ mod wait_tests {
         let store = Store::open(dir.path()).unwrap();
         let path = store.events_path();
         let (events, _) = broadcast::channel(1);
-        let app = App { store: Mutex::new(store), events, screens: Mutex::default() };
+        let app = App::new(store, events, "", "", None);
         let q = WaitQ { timeout: Some(1), ..query(None, 0) };
         let waiting = wait_since(&app, &q);
         tokio::pin!(waiting);
@@ -2047,7 +2151,7 @@ mod placement_tests {
         let mut store = Store::open(dir.path()).unwrap();
         store.create("placement", "<p>Test</p>".into(), "const verbs = {};".into(), json!({}), "test", false, "", "").unwrap();
         let (events, _) = broadcast::channel(16);
-        let app = Arc::new(App { store: Mutex::new(store), events, screens: Mutex::default() });
+        let app = Arc::new(App::new(store, events, "", "", None));
         for kind in ["ask", "look"] {
             for destination in [json!({"kind":"after", "selector":"#tiles"}), json!({"kind":"top"})] {
                 let mut received = app.events.subscribe();
@@ -2102,7 +2206,7 @@ mod tests {
     fn app() -> (tempfile::TempDir, Shared) {
         let dir = tempfile::tempdir().unwrap();
         let (events, _) = broadcast::channel(32);
-        let app = Arc::new(App { store: Mutex::new(Store::open(dir.path()).unwrap()), events, screens: Mutex::default() });
+        let app = Arc::new(App::new(Store::open(dir.path()).unwrap(), events, "", "", None));
         (dir, app)
     }
 
@@ -2402,7 +2506,7 @@ mod tests {
         assert!(serde_json::from_value::<Screen>(json!({"text": "tokenless", "width":1280, "height":900, "version":1})).is_err());
         let dir = app.store.lock().unwrap().home().to_path_buf();
         let (events, _) = broadcast::channel(32);
-        let restarted = Arc::new(App { store: Mutex::new(Store::open(&dir).unwrap()), events, screens: Mutex::default() });
+        let restarted = Arc::new(App::new(Store::open(&dir).unwrap(), events, "", "", None));
         let previous = owner(&app, "test:x").await;
         let current = owner(&restarted, "test:x").await;
         assert!(post(&restarted, snapshot(&previous, "OLD PAGE", 1)).await.is_err());

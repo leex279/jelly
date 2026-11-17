@@ -9,14 +9,17 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
 getrandom = "0.3"
+hyper = "1"
 lol_html = "2"
 rquickjs = "0.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+sha2 = "0.10"
 similar = "2"
 sysinfo = { version = "0.37.2", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "net", "time", "fs", "process"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+tower = { version = "0.5", features = ["util"] }
 ureq = { version = "2", features = ["json"] }
 url = "2"
 
