@@ -437,7 +437,8 @@ pub(crate) async fn run(app: crate::server::Shared) {
 
 /// Links `id` to a remote and syncs it now. A link that fails on its first push is
 /// not kept; one whose copy reached the remote is shared even when `links.json`
-/// could not record that, and the answer carries the save error.
+/// could not record that, and the answer carries the save error. Any link a failed
+/// push leaves behind is handed to the forwarder, so it is retried without a change.
 pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<Value, String> {
     let syncer = app.sync.as_ref().ok_or(NOT_OUTWARD)?;
     if id == PAGE {
@@ -466,11 +467,10 @@ pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<
         let url = syncer.link_status(id).map(|s| s["url"].as_str().unwrap_or("").to_string()).unwrap_or_default();
         json!({"jelly": id, "remote": remote, "owner": owner, "url": url, "version": version, "error": error})
     };
-    match reconcile(syncer, app, id) {
-        Ok(()) => Ok(shared(None)),
+    let answer = match reconcile(syncer, app, id) {
+        Ok(()) => return Ok(shared(None)),
         Err(Retry::Save(e)) => Ok(shared(Some(e))),
-        Err(Retry::Sync(e)) => {
-            if !is_new { return Err(e) }
+        Err(Retry::Sync(e)) if is_new => {
             let mut links = syncer.links.lock().expect("links lock");
             let link = links.remove(id);
             match save_links(&syncer.home, &links) {
@@ -482,7 +482,11 @@ pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<
                 }
             }
         }
-    }
+        Err(Retry::Sync(e)) => Err(e),
+    };
+    // A link the failed push left owing work is the forwarder's to finish.
+    if syncer.links.lock().expect("links lock").contains_key(id) { syncer.notify.notify_one(); }
+    answer
 }
 
 /// Drops the link; with `remove`, deletes the remote copy first and keeps the

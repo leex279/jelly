@@ -198,6 +198,15 @@ fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
         (!links.contains("p:note")).then_some(()).ok_or(links)
     });
 
+    // A push that cannot reach the remote leaves the link behind; the forwarder
+    // finishes it when the remote returns, with no further change.
+    drop(hosted);
+    let unreachable = failure(local.jelly(&client).args(["push", "plan"]).output().unwrap());
+    assert!(unreachable.contains("cannot reach"), "{unreachable}");
+    until(10, "ls saying behind after a failed push", || { let l = ls(); l.contains("behind: cannot reach").then_some(()).ok_or(l) });
+    let hosted = Daemon::start(&hosted_home, hosted_port, true);
+    until(30, "ls saying synced after the remote returns", || { let l = ls(); l.contains("(synced)").then_some(()).ok_or(l) });
+
     drop(hosted);
     stdout(local.jelly(&client).args(["set", "plan", r#"{"count": 99}"#]).output().unwrap());
     let state = stdout(local.jelly(&client).args(["state", "plan"]).output().unwrap());
