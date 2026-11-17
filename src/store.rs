@@ -1446,7 +1446,7 @@ fn attention_from(spec: &Value, id: String, by: &str) -> Result<Attention, Error
 }
 
 /// `name` or `project:name`, each part 1-64 of a-z, 0-9, - and _.
-fn valid_name(name: &str) -> Result<(), Error> {
+pub(crate) fn valid_name(name: &str) -> Result<(), Error> {
     let part = |p: &str| !p.is_empty() && p.len() <= 64 && p.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_');
     let ok = match name.split_once(':') {
         Some((project, rest)) => part(project) && part(rest),
@@ -1520,7 +1520,7 @@ fn read_optional(path: &Path) -> std::io::Result<String> {
     }
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, bytes)?;
     fs::rename(tmp, path)

@@ -36,7 +36,9 @@
   let working = boot.working || null;
   const subs = [];
   const enc = encodeURIComponent;
-  const api = `/api/jellies/${enc(boot.name)}`;
+  // On a hosted instance every path sits under the owner's prefix; locally it is "".
+  const base = boot.base || "";
+  const api = `${base}/api/jellies/${enc(boot.name)}`;
   // Names are unique per project: a short name means a jelly in this one.
   const project = boot.name.includes(":") ? boot.name.split(":")[0] : "";
   const full = (name) => (name.includes(":") || name === "surface" || !project ? name : `${project}:${name}`);
@@ -68,6 +70,7 @@
   }
 
   async function post(path, body) {
+    if (boot.readOnly) throw new Error("This is a shared copy; changes happen on the owner's jelly.");
     const r = await fetch(path, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -82,7 +85,7 @@
   const listeners = new Set();
   let dropped = false;
   (function connect() {
-    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/ws`);
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}${base}/api/ws`);
     ws.onopen = () => { if (dropped) location.reload(); };
     ws.onmessage = (m) => {
       const ev = JSON.parse(m.data);
@@ -124,7 +127,7 @@
       return ev;
     },
     async read(name) {
-      const r = await fetch(`/api/jellies/${enc(full(name))}/state`);
+      const r = await fetch(`${base}/api/jellies/${enc(full(name))}/state`);
       if (!r.ok) throw new Error((await r.json()).error);
       return r.json();
     },
@@ -141,7 +144,7 @@
     focus(name) {
       name = full(name);
       if (embedded) parent.postMessage({ type: "jelly:show", name }, location.origin);
-      else location.href = `/j/${enc(name)}/`;
+      else location.href = `${base}/j/${enc(name)}/`;
     },
     show(name) { return this.focus(name); }, // old name
     resolve: (id) => post(`${api}/resolve`, { id }),
@@ -156,7 +159,7 @@
     onAttend(fn) { attendSubs.add(fn); return () => attendSubs.delete(fn); },
     /** Answer one: an option id, text, or both. A look takes nothing ("seen"). */
     answer: (id, { option, text } = {}) => post(`${api}/attention/${enc(id)}/answer`, { option, text: text || "" }),
-    asset: (file) => `/j/${enc(boot.name)}/assets/${enc(file)}`,
+    asset: (file) => `${base}/j/${enc(boot.name)}/assets/${enc(file)}`,
     reply: (id, text) => post(`${api}/reply`, { id, text }),
   };
 
@@ -838,7 +841,7 @@
   }
   // At most one post per interval, so a page that changes all the time still reports.
   function postSnapshot() {
-    if (snapT) return;
+    if (snapT || boot.readOnly) return;
     snapT = setTimeout(() => {
       snapT = null;
       fetch(`${api}/screen`, { method: "POST", headers: { "content-type": "application/json" },
