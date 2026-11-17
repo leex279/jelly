@@ -96,7 +96,7 @@ fn until(secs: u64, what: &str, mut check: impl FnMut() -> Result<(), String>) {
 
 const VIEW: &str = "<p>sync test</p>";
 const VIEW2: &str = "<p>sync test, reshaped</p>";
-const VERBS: &str = "const verbs = {increment(s) { s.count += 1; }};";
+const VERBS: &str = "const verbs = {increment(s) { s.count += 1; }, clear() { return null; }};";
 
 #[test]
 fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
@@ -118,6 +118,12 @@ fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
     assert!(remotes.contains(&hosted.url) && remotes.contains("as alice") && !remotes.contains(&key), "{remotes}");
     let remotes_file = std::fs::read_to_string(local_home.join("remotes.json")).unwrap();
     assert!(remotes_file.contains(&key), "the local daemon keeps the key it pushes with");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(local_home.join("remotes.json")).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the key file is readable by its owner only");
+    }
 
     std::fs::write(temp.path().join("view.html"), VIEW).unwrap();
     std::fs::write(temp.path().join("view2.html"), VIEW2).unwrap();
@@ -153,6 +159,12 @@ fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
     until(10, "a verb call reaching the remote", || (remote_state() == Ok(json!({"count": 2}))).then_some(()).ok_or_else(|| format!("{:?}", remote_state())));
     stdout(local.jelly(&client).args(["set", "plan", r#"{"count": 10}"#]).output().unwrap());
     until(10, "a set reaching the remote", || (remote_state() == Ok(json!({"count": 10}))).then_some(()).ok_or_else(|| format!("{:?}", remote_state())));
+    // A verb that returns null leaves the local state null; the remote holds that as {}.
+    stdout(local.jelly(&client).args(["call", "plan", "clear"]).output().unwrap());
+    until(10, "a null state reaching the remote", || (remote_state() == Ok(json!({}))).then_some(()).ok_or_else(|| format!("{:?}", remote_state())));
+    until(10, "ls saying synced after a null state", || { let l = stdout(local.jelly(&client).args(["ls"]).output().unwrap()); l.contains("(synced)").then_some(()).ok_or(l) });
+    stdout(local.jelly(&client).args(["set", "plan", r#"{"count": 10}"#]).output().unwrap());
+    until(10, "a set after the null state reaching the remote", || (remote_state() == Ok(json!({"count": 10}))).then_some(()).ok_or_else(|| format!("{:?}", remote_state())));
     stdout(local.jelly(&client).args(["reshape", "plan", "--view"]).arg(temp.path().join("view2.html")).output().unwrap());
     let remote_view = || get(&format!("{remote_api}/p:plan")).map(|j| j["view"].clone());
     until(10, "a reshape reaching the remote", || (remote_view() == Ok(json!(VIEW2))).then_some(()).ok_or_else(|| format!("{:?}", remote_view())));
@@ -174,6 +186,17 @@ fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
 
     let ls = || stdout(local.jelly(&client).args(["ls"]).output().unwrap());
     until(10, "ls saying synced", || { let l = ls(); l.contains("(synced)").then_some(()).ok_or(l) });
+
+    // Removing a shared jelly locally takes its public copy down with it.
+    stdout(local.jelly(&client).args(["new", "note", "--view"]).arg(temp.path().join("view.html")).arg("--verbs").arg(temp.path().join("verbs.js")).output().unwrap());
+    stdout(local.jelly(&client).args(["push", "note"]).output().unwrap());
+    assert!(get(&format!("{remote_api}/p:note")).is_ok());
+    stdout(local.jelly(&client).args(["rm", "note"]).output().unwrap());
+    until(10, "a removed jelly leaving the remote", || match get(&format!("{remote_api}/p:note")) { Err(404) => Ok(()), other => Err(format!("{other:?}")) });
+    until(10, "the removed jelly's link going away", || {
+        let links = std::fs::read_to_string(local_home.join("links.json")).unwrap();
+        (!links.contains("p:note")).then_some(()).ok_or(links)
+    });
 
     drop(hosted);
     stdout(local.jelly(&client).args(["set", "plan", r#"{"count": 99}"#]).output().unwrap());
@@ -197,6 +220,17 @@ fn pushed_jellies_follow_their_local_jelly_and_catch_up_after_downtime() {
 
     let refused = failure(local.jelly(&client).args(["remote", "rm", &hosted.url]).output().unwrap());
     assert!(refused.contains("unshare other:plan"), "{refused}");
+
+    // A link change that cannot reach disk is an error, not a success: the link stays.
+    let links_path = local_home.join("links.json");
+    std::fs::remove_file(&links_path).unwrap();
+    std::fs::create_dir(&links_path).unwrap();
+    let not_saved = failure(local.jelly(&client).args(["unshare", "other:plan"]).output().unwrap());
+    assert!(not_saved.contains("could not save") && not_saved.contains("links.json"), "{not_saved}");
+    let kept = stdout(local.jelly(&client).args(["ls", "--all"]).output().unwrap());
+    assert!(kept.contains(&format!("shared at {moved_url}")), "{kept}");
+    std::fs::remove_dir(&links_path).unwrap();
+    std::fs::remove_file(local_home.join("links.json.tmp")).ok();
 
     let unshared = stdout(local.jelly(&client).args(["unshare", "other:plan", "--rm"]).output().unwrap());
     assert_eq!(unshared.trim(), format!("other:plan: removed from {}", hosted.url));

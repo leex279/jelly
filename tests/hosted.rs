@@ -105,7 +105,14 @@ fn keys_gate_writes_and_everyone_can_read() {
     let alice_api = format!("{}/people/alice/api/jellies", daemon.url);
     let bob_api = format!("{}/people/bob/api/jellies", daemon.url);
 
-    assert_eq!(post(&alice_api, None, plan.clone()), 401);
+    let refused = ureq::post(&alice_api).send_json(plan.clone()).unwrap_err();
+    match refused {
+        ureq::Error::Status(401, r) => {
+            let body = r.into_string().unwrap();
+            assert!(body.contains("only alice can change") && body.contains("alice's key"), "{body}");
+        }
+        other => panic!("{other}"),
+    }
     assert_eq!(status(ureq::get(&format!("{alice_api}/p:plan")).call()), 404, "nothing was made without a key");
     assert_eq!(post(&alice_api, Some(&bob), plan.clone()), 403);
     assert_eq!(post(&alice_api, Some("jk_made_up"), plan.clone()), 401);
@@ -120,6 +127,10 @@ fn keys_gate_writes_and_everyone_can_read() {
     assert_eq!(status(ureq::get(&format!("{}/people/alice/", daemon.url)).call()), 200, "the person's jelly page");
     assert_eq!(status(ureq::get(&format!("{}/people/carol/", daemon.url)).call()), 404);
     assert_eq!(status(ureq::get(&format!("{}/people/alice/j/p:plan", daemon.url)).call()), 200, "redirect to the slash form stays under the prefix");
+    // `see` starts a browser on the host and writes under its home: not served for a person.
+    assert_eq!(status(ureq::get(&format!("{alice_api}/p:plan/see?png=true")).call()), 404);
+    assert_eq!(status(ureq::get(&format!("{}/people/alice/see-frame/p:plan?w=390&h=844", daemon.url)).call()), 404);
+    assert!(!home.join("people").join("alice").join("see").exists(), "a keyless GET wrote into alice's store");
 
     let all: Vec<Value> = ureq::get(&format!("{}/api/jellies", daemon.url)).call().unwrap().into_json().unwrap();
     let mut owners: Vec<(String, String, String)> = all.iter()

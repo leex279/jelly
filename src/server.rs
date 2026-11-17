@@ -174,7 +174,16 @@ pub async fn serve(store: Store, listener: tokio::net::TcpListener) -> std::io::
 }
 
 pub(crate) fn router(app: Shared) -> Router {
-    Router::new()
+    // `jelly see` starts a browser on this machine and writes screenshots under the
+    // home, so it exists only on a local daemon, never under a hosted person's prefix.
+    let local_only = if app.owner.is_empty() {
+        Router::new()
+            .route("/api/jellies/{name}/see", get(see))
+            .route("/see-frame/{name}", get(see_frame))
+    } else {
+        Router::new()
+    };
+    local_only
         // The jelly page: every project at /, one project at /p/<project>.
         .route("/", get(|st: State<Shared>| async move { view(st, Path(PAGE.into())).await }))
         .route("/runtime.js", get(|| async { ([(header::CONTENT_TYPE, "text/javascript")], RUNTIME_JS) }))
@@ -209,8 +218,6 @@ pub(crate) fn router(app: Shared) -> Router {
         .route("/api/inbox/commit", post(commit_inbox))
         .route("/api/jellies/{name}/screen", post(put_screen))
         .route("/api/jellies/{name}/note", post(note))
-        .route("/api/jellies/{name}/see", get(see))
-        .route("/see-frame/{name}", get(see_frame))
         .route("/api/projects/{project}/design", get(get_design).put(put_design))
         .route("/p/{project}/DESIGN.md", get(get_design))
         .route("/p/{project}/design.css", get(design_css))
@@ -371,20 +378,20 @@ async fn state(State(app): State<Shared>, Path(name): Path<String>, Query(q): Qu
     }
 }
 
-#[derive(Deserialize)]
-struct CreateReq {
-    name: String,
-    view: String,
-    verbs: String,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct CreateReq {
+    pub(crate) name: String,
+    pub(crate) view: String,
+    pub(crate) verbs: String,
     #[serde(default)]
-    state: Value,
-    by: Option<String>,
+    pub(crate) state: Value,
+    pub(crate) by: Option<String>,
     #[serde(default)]
-    replace: bool,
+    pub(crate) replace: bool,
     #[serde(default)]
-    about: String,
+    pub(crate) about: String,
     #[serde(default)]
-    project: String,
+    pub(crate) project: String,
 }
 
 async fn create(State(app): State<Shared>, Json(r): Json<CreateReq>) -> Result<Json<Event>, ApiError> {
@@ -407,15 +414,15 @@ async fn call(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json
     app.change(|s| s.call_from(&name, &r.verb, r.args, &by(r.by)?, r.source))
 }
 
-#[derive(Deserialize)]
-struct SetReq {
+#[derive(Serialize, Deserialize)]
+pub(crate) struct SetReq {
     #[serde(default)]
-    pointer: String,
+    pub(crate) pointer: String,
     #[serde(default)]
-    value: Option<Value>,
+    pub(crate) value: Option<Value>,
     #[serde(default)]
-    remove: bool,
-    by: Option<String>,
+    pub(crate) remove: bool,
+    pub(crate) by: Option<String>,
 }
 
 async fn set_state(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<SetReq>) -> Result<Json<Event>, ApiError> {
@@ -427,12 +434,12 @@ async fn set_state(State(app): State<Shared>, Path(name): Path<String>, Json(r):
     app.change(|s| s.set_state(&name, &r.pointer, value, &by(r.by)?))
 }
 
-#[derive(Deserialize)]
-struct ReshapeReq {
-    view: Option<String>,
-    verbs: Option<String>,
-    about: Option<String>,
-    by: Option<String>,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ReshapeReq {
+    pub(crate) view: Option<String>,
+    pub(crate) verbs: Option<String>,
+    pub(crate) about: Option<String>,
+    pub(crate) by: Option<String>,
 }
 
 async fn reshape(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<ReshapeReq>) -> Result<Json<Event>, ApiError> {
@@ -489,10 +496,10 @@ async fn reply(State(app): State<Shared>, Path(name): Path<String>, Json(r): Jso
     app.change(|s| s.reply(&name, &r.id, &r.text, &by(r.by)?, r.resolve))
 }
 
-#[derive(Deserialize)]
-struct ProjectReq {
-    project: String,
-    by: Option<String>,
+#[derive(Serialize, Deserialize)]
+pub(crate) struct ProjectReq {
+    pub(crate) project: String,
+    pub(crate) by: Option<String>,
 }
 
 async fn move_project(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<ProjectReq>) -> Result<Json<Event>, ApiError> {

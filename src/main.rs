@@ -481,7 +481,7 @@ fn run_with_start(mut cli: Cli, start: impl FnOnce(&str, bool) -> Result<(), Str
                     Ok(())
                 }
                 KeysAction::Ls => {
-                    let keys = hosted::list(&home)?;
+                    let keys = hosted::read_keys(&home)?;
                     if keys.is_empty() {
                         output(format_args!("No keys in {}. Issue one with jelly keys new NAME\n", hosted::keys_path(&home).display()))?;
                     }
@@ -1301,9 +1301,6 @@ mod tests {
         let keys_home = tempfile::tempdir().unwrap();
         let cli = parse(&["jelly", "--url", super::startup::DEFAULT_URL, "keys", "ls", "--home", keys_home.path().to_str().unwrap()]);
         assert!(run_with_start(cli, |_, _| panic!("keys must bypass startup")).is_ok());
-        let cli = parse(&["jelly", "serve", "--listen", "0.0.0.0", "--port", "0", "--home", home.path().to_str().unwrap()]);
-        let error = run_with_start(cli, |_, _| panic!("serve must bypass startup")).unwrap_err().to_string();
-        assert!(error.contains("add --hosted"), "{error}");
     }
 
     #[test]

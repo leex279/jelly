@@ -7,7 +7,8 @@
 //! outside state and undo. The forwarder is the only network user here, and it
 //! never holds the store lock across a request.
 
-use crate::server::App;
+use crate::hosted::person_path;
+use crate::server::{App, CreateReq, ProjectReq, ReshapeReq, SetReq};
 use crate::store::{self, Event, EventKind, Jelly, PAGE};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -74,7 +75,8 @@ pub(crate) struct Syncer {
     notify: Notify,
 }
 
-fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<T> {
+/// Reads a JSON file; a missing file is the empty value.
+pub(crate) fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<T> {
     match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: {e}", path.display()))),
@@ -83,11 +85,16 @@ fn read_json<T: Default + serde::de::DeserializeOwned>(path: &Path) -> std::io::
     }
 }
 
-fn save_links(home: &Path, links: &Links) {
+fn save_links(home: &Path, links: &Links) -> Result<(), String> {
+    let path = home.join("links.json");
     let bytes = serde_json::to_vec_pretty(links).expect("links serialize");
-    if let Err(e) = store::write_atomic(&home.join("links.json"), &bytes) {
-        eprintln!("jelly: could not save links.json: {e}");
-    }
+    store::write_atomic(&path, &bytes).map_err(|e| format!("could not save {}: {e}", path.display()))
+}
+
+/// A state the remote can hold: it stores `{}` for a `null` state, so the local
+/// copy is compared and sent that way.
+fn remote_state(state: &Value) -> Value {
+    if state.is_null() { json!({}) } else { state.clone() }
 }
 
 /// The remotes file holds keys in clear, so only the owner may read it.
@@ -122,7 +129,7 @@ impl Syncer {
     /// store lock, so it only writes the small links file and takes no other lock.
     pub(crate) fn observe(&self, events: &[Event]) {
         let mut links = self.links.lock().expect("links lock");
-        let mut changed = false;
+        let mut marked: Vec<String> = Vec::new();
         for ev in events {
             let key = match ev.kind {
                 EventKind::Move => ev.args.as_ref().and_then(|a| a["from"].as_str()).map(String::from),
@@ -145,16 +152,23 @@ impl Syncer {
                     links.insert(ev.jelly.clone(), link);
                 }
                 EventKind::Remove => links.get_mut(&key).expect("checked").removed = true,
-                _ => continue,
+                // Kept local: they are the owner's conversation with their agent, not the jelly.
+                EventKind::Pin | EventKind::Archive | EventKind::Restore | EventKind::Note | EventKind::Working
+                | EventKind::Comment | EventKind::Reply | EventKind::Resolve | EventKind::Attention
+                | EventKind::Answer | EventKind::Withdraw => continue,
             }
-            let marked = if ev.kind == EventKind::Move { &ev.jelly } else { &key };
-            links.get_mut(marked).expect("just placed").mark(&ev.by);
-            changed = true;
+            let placed = if ev.kind == EventKind::Move { ev.jelly.clone() } else { key };
+            links.get_mut(&placed).expect("just placed").mark(&ev.by);
+            marked.push(placed);
         }
-        if changed {
-            save_links(&self.home, &links);
-            self.notify.notify_one();
+        if marked.is_empty() { return }
+        if let Err(e) = save_links(&self.home, &links) {
+            eprintln!("jelly: {e}");
+            for id in &marked {
+                if let Some(link) = links.get_mut(id) { link.error = Some(e.clone()) }
+            }
         }
+        self.notify.notify_one();
     }
 
     /// What `jelly ls` shows for a linked jelly; `None` when it is not shared.
@@ -173,7 +187,7 @@ impl Syncer {
             link.pending.dirty = true;
             link.pending.generation += 1;
         }
-        if !links.is_empty() { save_links(&self.home, &links); }
+        if let Err(e) = save_links(&self.home, &links) { eprintln!("jelly: {e}") }
     }
 
     fn pick_remote(&self, to: Option<String>) -> Result<(String, String), String> {
@@ -199,7 +213,7 @@ impl Syncer {
 }
 
 fn remote_url(link: &Link, id: &str) -> String {
-    format!("{}/people/{}/j/{}/", link.remote, link.owner, id)
+    format!("{}{}/j/{}/", link.remote, person_path(&link.owner), id)
 }
 
 fn describe_status(remote: &str, code: u16, resp: ureq::Response) -> String {
@@ -225,14 +239,19 @@ struct RemoteApi<'a> {
     key: &'a str,
 }
 
-impl RemoteApi<'_> {
+impl<'a> RemoteApi<'a> {
+    fn new(link: &'a Link, key: &'a str) -> Self {
+        RemoteApi { remote: &link.remote, api: format!("{}{}/api/jellies", link.remote, person_path(&link.owner)), key }
+    }
+
     fn request(&self, method: &str, path: &str) -> ureq::Request {
         ureq::request(method, &format!("{}{path}", self.api))
             .set("authorization", &format!("Bearer {}", self.key))
             .timeout(TIMEOUT)
     }
 
-    fn send(&self, method: &str, path: &str, body: Value) -> Result<Answer, String> {
+    fn send(&self, method: &str, path: &str, body: impl Serialize) -> Result<Answer, String> {
+        let body = serde_json::to_value(body).expect("request serializes");
         let req = self.request(method, path);
         match if body.is_null() { req.call() } else { req.send_json(body) } {
             Ok(r) => Ok(Answer::Ok(r)),
@@ -242,7 +261,7 @@ impl RemoteApi<'_> {
     }
 
     /// A request that must succeed.
-    fn must(&self, method: &str, path: &str, body: Value) -> Result<ureq::Response, String> {
+    fn must(&self, method: &str, path: &str, body: impl Serialize) -> Result<ureq::Response, String> {
         match self.send(method, path, body)? {
             Answer::Ok(r) => Ok(r),
             Answer::Status(code, r) => Err(describe_status(self.remote, code, r)),
@@ -250,7 +269,7 @@ impl RemoteApi<'_> {
     }
 
     /// Like `must`, but a 404 is an answer, not a failure: `None`.
-    fn send_or_missing(&self, method: &str, path: &str, body: Value) -> Result<Option<ureq::Response>, String> {
+    fn send_or_missing(&self, method: &str, path: &str, body: impl Serialize) -> Result<Option<ureq::Response>, String> {
         match self.send(method, path, body)? {
             Answer::Ok(r) => Ok(Some(r)),
             Answer::Status(404, _) => Ok(None),
@@ -262,7 +281,7 @@ impl RemoteApi<'_> {
 /// Brings the remote copy to `jelly`'s content. `None` for the jelly means it is
 /// gone locally, so the copy goes too.
 fn sync_once(link: &Link, key: &str, id: &str, jelly: Option<Jelly>, files: &[String], dir: &Path) -> Result<Outcome, String> {
-    let api = RemoteApi { remote: &link.remote, api: format!("{}/people/{}/api/jellies", link.remote, link.owner), key };
+    let api = RemoteApi::new(link, key);
     let by = match (&link.pending.by, &jelly) {
         (by, _) if !by.is_empty() => by.clone(),
         (_, Some(j)) => j.made_by.clone(),
@@ -274,32 +293,34 @@ fn sync_once(link: &Link, key: &str, id: &str, jelly: Option<Jelly>, files: &[St
         return Ok(Outcome::Dropped);
     };
     if link.remote_id != id {
-        let project = id.split_once(':').map_or("", |(p, _)| p);
-        match api.send("POST", &format!("/{}/move", link.remote_id), json!({"project": project, "by": by}))? {
+        let moved = ProjectReq { project: jelly.project().into(), by: Some(by.clone()) };
+        match api.send("POST", &format!("/{}/move", link.remote_id), moved)? {
             Answer::Ok(_) | Answer::Status(404, _) => {}
             // The target name is taken on the remote: the old copy goes and the new one is created below.
             Answer::Status(409, _) => { api.send_or_missing("DELETE", &format!("/{}{by_query}", link.remote_id), Value::Null)?; }
             Answer::Status(code, r) => return Err(describe_status(&link.remote, code, r)),
         }
     }
-    let remote: Option<Value> = api.send_or_missing("GET", &format!("/{id}"), Value::Null)?
+    let remote: Option<Jelly> = api.send_or_missing("GET", &format!("/{id}"), Value::Null)?
         .map(|r| r.into_json()).transpose().map_err(|e| e.to_string())?;
+    let state = remote_state(&jelly.state);
     let present: Vec<String> = match remote {
         None => {
-            api.must("POST", "", json!({"name": id, "view": jelly.view, "verbs": jelly.verbs, "state": jelly.state,
-                "by": by, "replace": true, "about": jelly.about, "project": ""}))?;
+            api.must("POST", "", CreateReq { name: id.into(), view: jelly.view, verbs: jelly.verbs, state,
+                by: Some(by), replace: true, about: jelly.about, project: String::new() })?;
             Vec::new()
         }
         Some(remote) => {
-            let differs = |key: &str, local: &str| remote[key].as_str() != Some(local);
-            let view = differs("view", &jelly.view).then(|| jelly.view.clone());
-            let verbs = differs("verbs", &jelly.verbs).then(|| jelly.verbs.clone());
-            let about = differs("about", &jelly.about).then(|| jelly.about.clone());
-            if view.is_some() || verbs.is_some() || about.is_some() {
-                api.must("POST", &format!("/{id}/reshape"), json!({"view": view, "verbs": verbs, "about": about, "by": by}))?;
+            let changed = |remote: &str, local: &str| (remote != local).then(|| local.to_string());
+            let reshape = ReshapeReq {
+                view: changed(&remote.view, &jelly.view), verbs: changed(&remote.verbs, &jelly.verbs),
+                about: changed(&remote.about, &jelly.about), by: Some(by.clone()),
+            };
+            if reshape.view.is_some() || reshape.verbs.is_some() || reshape.about.is_some() {
+                api.must("POST", &format!("/{id}/reshape"), reshape)?;
             }
-            if remote["state"] != jelly.state {
-                api.must("POST", &format!("/{id}/set"), json!({"pointer": "", "value": jelly.state, "by": by}))?;
+            if remote.state != state {
+                api.must("POST", &format!("/{id}/set"), SetReq { pointer: String::new(), value: Some(state), remove: false, by: Some(by) })?;
             }
             api.must("GET", &format!("/{id}/assets"), Value::Null)?.into_json().map_err(|e| e.to_string())?
         }
@@ -334,20 +355,30 @@ fn reconcile(syncer: &Syncer, app: &App, id: &str) -> Result<(), String> {
         Some(key) => sync_once(&link, &key, id, jelly, &files, &dir),
         None => Err(format!("no key for {}: jelly remote add {} KEY", link.remote, link.remote)),
     };
-    let mut links = syncer.links.lock().expect("links lock");
-    match &result {
-        Ok(Outcome::Dropped) => { links.remove(id); }
-        Ok(Outcome::Synced) => if let Some(current) = links.get_mut(id) {
-            current.remote_id = id.into();
-            current.error = None;
-            if current.pending.generation == link.pending.generation {
-                current.pending = Pending { generation: link.pending.generation, ..Pending::default() };
-            }
-        },
-        Err(e) => if let Some(current) = links.get_mut(id) { current.error = Some(e.clone()) },
+    syncer.record(id, &link, result)
+}
+
+impl Syncer {
+    /// Records a sync's outcome on the live link. `seen` is the link as the sync
+    /// read it: pending work is cleared only when nothing was marked since, so a
+    /// change that landed during the sync is still owed.
+    fn record(&self, id: &str, seen: &Link, result: Result<Outcome, String>) -> Result<(), String> {
+        let mut links = self.links.lock().expect("links lock");
+        match &result {
+            Ok(Outcome::Dropped) => { links.remove(id); }
+            Ok(Outcome::Synced) => if let Some(current) = links.get_mut(id) {
+                current.remote_id = id.into();
+                current.error = None;
+                if current.pending.generation == seen.pending.generation {
+                    current.pending = Pending { generation: seen.pending.generation, ..Pending::default() };
+                }
+            },
+            Err(e) => if let Some(current) = links.get_mut(id) { current.error = Some(e.clone()) },
+        }
+        let saved = save_links(&self.home, &links);
+        if let (Err(e), Some(current)) = (&saved, links.get_mut(id)) { current.error = Some(e.clone()) }
+        result.map(|_| ()).and(saved)
     }
-    save_links(&syncer.home, &links);
-    result.map(|_| ())
 }
 
 /// The forwarder: syncs every link with pending work, one at a time, retrying a
@@ -407,7 +438,10 @@ pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<
         }
         link.pending.dirty = true;
         link.mark(by);
-        save_links(&syncer.home, &links);
+        if let Err(e) = save_links(&syncer.home, &links) {
+            if is_new { links.remove(id); }
+            return Err(e);
+        }
         is_new
     };
     match reconcile(syncer, app, id) {
@@ -419,7 +453,7 @@ pub(crate) fn push(app: &App, id: &str, to: Option<String>, by: &str) -> Result<
             if is_new {
                 let mut links = syncer.links.lock().expect("links lock");
                 links.remove(id);
-                save_links(&syncer.home, &links);
+                if let Err(e) = save_links(&syncer.home, &links) { eprintln!("jelly: {e}") }
             }
             Err(e)
         }
@@ -434,12 +468,15 @@ pub(crate) fn unshare(app: &App, id: &str, remove: bool, by: &str) -> Result<Val
     if remove {
         let key = syncer.remotes.lock().expect("remotes lock").get(&link.remote).map(|r| r.key.clone())
             .ok_or_else(|| format!("no key for {}: jelly remote add {} KEY", link.remote, link.remote))?;
-        let api = RemoteApi { remote: &link.remote, api: format!("{}/people/{}/api/jellies", link.remote, link.owner), key: &key };
-        api.send_or_missing("DELETE", &format!("/{}?by={}", link.remote_id, crate::encode(by)), Value::Null)?;
+        RemoteApi::new(&link, &key).send_or_missing("DELETE", &format!("/{}?by={}", link.remote_id, crate::encode(by)), Value::Null)?;
     }
     let mut links = syncer.links.lock().expect("links lock");
-    links.remove(id);
-    save_links(&syncer.home, &links);
+    let dropped = links.remove(id);
+    if let Err(e) = save_links(&syncer.home, &links) {
+        // Memory follows disk, so the link is still there to retry.
+        if let Some(link) = dropped { links.insert(id.into(), link); }
+        return Err(e);
+    }
     Ok(json!({"jelly": id, "remote": link.remote, "removed": remove}))
 }
 
@@ -476,4 +513,43 @@ pub(crate) fn remove_remote(app: &App, url: &str) -> Result<Value, String> {
 
 pub(crate) fn remotes(app: &App) -> Result<Value, String> {
     Ok(app.sync.as_ref().ok_or(NOT_OUTWARD)?.remotes())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn syncer_with_link(home: &Path, id: &str) -> Syncer {
+        let syncer = Syncer::open(home).unwrap();
+        syncer.links.lock().unwrap().insert(id.into(), Link {
+            remote: "http://remote".into(), owner: "alice".into(), remote_id: id.into(),
+            pending: Pending { dirty: true, ..Pending::default() }, error: None, removed: false,
+        });
+        syncer
+    }
+
+    #[test]
+    fn a_change_during_a_sync_is_still_owed_after_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let syncer = syncer_with_link(dir.path(), "p:plan");
+        let seen = syncer.links.lock().unwrap().get("p:plan").cloned().unwrap();
+
+        syncer.links.lock().unwrap().get_mut("p:plan").unwrap().mark("person");
+        syncer.record("p:plan", &seen, Ok(Outcome::Synced)).unwrap();
+        let status = syncer.link_status("p:plan").unwrap();
+        assert_eq!(status["synced"], json!(false), "the change made during the sync is not on the remote yet: {status}");
+        assert!(syncer.links.lock().unwrap()["p:plan"].has_work("p:plan"));
+
+        let seen = syncer.links.lock().unwrap().get("p:plan").cloned().unwrap();
+        syncer.record("p:plan", &seen, Ok(Outcome::Synced)).unwrap();
+        assert_eq!(syncer.link_status("p:plan").unwrap()["synced"], json!(true));
+        let saved: Links = read_json(&dir.path().join("links.json")).unwrap();
+        assert!(!saved["p:plan"].pending.dirty);
+    }
+
+    #[test]
+    fn a_null_state_is_sent_as_the_empty_object_the_remote_keeps() {
+        assert_eq!(remote_state(&Value::Null), json!({}));
+        assert_eq!(remote_state(&json!({"count": 1})), json!({"count": 1}));
+    }
 }

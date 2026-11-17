@@ -28,13 +28,8 @@ pub(crate) fn keys_path(home: &FsPath) -> PathBuf {
     home.join("keys.json")
 }
 
-fn read_keys(home: &FsPath) -> Result<Vec<KeyRecord>, String> {
-    let path = keys_path(home);
-    match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+pub(crate) fn read_keys(home: &FsPath) -> Result<Vec<KeyRecord>, String> {
+    crate::remote::read_json(&keys_path(home)).map_err(|e| format!("{}: {e}", keys_path(home).display()))
 }
 
 fn write_keys(home: &FsPath, keys: &[KeyRecord]) -> Result<(), String> {
@@ -48,12 +43,23 @@ fn digest(key: &str) -> String {
     format!("{:x}", sha2::Sha256::digest(key.as_bytes()))
 }
 
-/// Issues a key for `name` and returns it once; the file keeps only its hash.
-pub(crate) fn issue(home: &FsPath, name: &str) -> Result<String, String> {
+/// The one rule for a person's name: a single jelly-name part, so it can be a
+/// path segment under `/people/` and a directory under `people/`.
+fn person_name(name: &str) -> Result<(), String> {
     if name.contains(':') {
         return Err(format!("bad name {name:?}: a person's name has no ':'"));
     }
-    store::valid_name(name).map_err(|e| e.to_string())?;
+    store::valid_name(name).map_err(|e| e.to_string())
+}
+
+/// Where a person's daemon is mounted; the forwarder builds remote paths from it too.
+pub(crate) fn person_path(name: &str) -> String {
+    format!("/people/{name}")
+}
+
+/// Issues a key for `name` and returns it once; the file keeps only its hash.
+pub(crate) fn issue(home: &FsPath, name: &str) -> Result<String, String> {
+    person_name(name)?;
     let mut keys = read_keys(home)?;
     if keys.iter().any(|k| k.name == name) {
         return Err(format!("{name} already has a key; jelly keys revoke {name} first"));
@@ -76,10 +82,6 @@ pub(crate) fn revoke(home: &FsPath, name: &str) -> Result<(), String> {
         return Err(format!("{name} has no key"));
     }
     write_keys(home, &keys)
-}
-
-pub(crate) fn list(home: &FsPath) -> Result<Vec<KeyRecord>, String> {
-    read_keys(home)
 }
 
 /// The person a presented key belongs to. Reads the file every time, so a
@@ -109,7 +111,7 @@ impl Hosted {
         let mut store = Store::open(&self.home.join("people").join(name))?;
         server::boot_store(&mut store)?;
         let (events, _) = broadcast::channel(1024);
-        let app: Shared = Arc::new(App::new(store, events, &format!("/people/{name}"), name, None));
+        let app: Shared = Arc::new(App::new(store, events, &person_path(name), name, None));
         Ok(Person { router: server::router(app.clone()), app })
     }
 
@@ -139,26 +141,26 @@ fn error(status: StatusCode, message: String) -> Response {
 
 async fn dispatch(State(hosted): State<Arc<Hosted>>, Path(params): Path<HashMap<String, String>>, req: Request) -> Response {
     let owner = params.get("owner").cloned().unwrap_or_default();
-    if owner.contains(':') || store::valid_name(&owner).is_err() {
-        return error(StatusCode::NOT_FOUND, format!("no jellies at /people/{owner}"));
+    let prefix = person_path(&owner);
+    if person_name(&owner).is_err() {
+        return error(StatusCode::NOT_FOUND, format!("no jellies at {prefix}"));
     }
     let write = !matches!(*req.method(), Method::GET | Method::HEAD);
     if write {
         match person_for(&hosted.home, bearer(req.headers())) {
-            None => return error(StatusCode::UNAUTHORIZED, "this hosted jelly needs a key for changes: jelly remote add URL KEY, then push from your own daemon".into()),
-            Some(name) if name != owner => return error(StatusCode::FORBIDDEN, format!("/people/{owner} belongs to {owner}; this key is {name}'s")),
+            None => return error(StatusCode::UNAUTHORIZED, format!("only {owner} can change these jellies; a change needs {owner}'s key (jelly remote add URL KEY, then push from {owner}'s own daemon)")),
+            Some(name) if name != owner => return error(StatusCode::FORBIDDEN, format!("{prefix} belongs to {owner}; this key is {name}'s")),
             Some(_) => {}
         }
     }
     let person = match hosted.person(&owner, write) {
         Ok(Some(person)) => person,
-        Ok(None) => return error(StatusCode::NOT_FOUND, format!("no jellies at /people/{owner}")),
+        Ok(None) => return error(StatusCode::NOT_FOUND, format!("no jellies at {prefix}")),
         Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("could not open {owner}'s jellies: {e}")),
     };
     // The person's router sees the path under its mount, raw, so encoded names survive.
-    let prefix = format!("/people/{owner}");
     let Some(rest) = req.uri().path().strip_prefix(prefix.as_str()) else {
-        return error(StatusCode::NOT_FOUND, format!("no jellies at /people/{owner}"));
+        return error(StatusCode::NOT_FOUND, format!("no jellies at {prefix}"));
     };
     let path = if rest.is_empty() { "/" } else { rest };
     let uri: Uri = match format!("{path}{}", req.uri().query().map(|q| format!("?{q}")).unwrap_or_default()).parse() {
@@ -183,7 +185,7 @@ fn listing_with_owner(name: &str, app: &App) -> Vec<Value> {
     server::listing(&store).into_iter().map(|mut item| {
         let id = item["name"].as_str().unwrap_or("").to_string();
         item["owner"] = json!(name);
-        item["url"] = json!(format!("/people/{name}/j/{id}/"));
+        item["url"] = json!(format!("{}/j/{id}/", person_path(name)));
         item
     }).collect()
 }
@@ -212,7 +214,7 @@ async fn index(State(hosted): State<Arc<Hosted>>) -> Html<String> {
         body.push_str("<p>Nobody has pushed a jelly here yet.</p>");
     }
     for (name, app) in &people {
-        body.push_str(&format!("<h2><a href=\"/people/{0}/\">{0}</a>'s jellies</h2><ul>", escape(name)));
+        body.push_str(&format!("<h2><a href=\"{}/\">{}</a>'s jellies</h2><ul>", escape(&person_path(name)), escape(name)));
         let items = listing_with_owner(name, app);
         if items.is_empty() {
             body.push_str("<li><small>nothing yet</small></li>");
@@ -220,8 +222,8 @@ async fn index(State(hosted): State<Arc<Hosted>>) -> Html<String> {
         for item in items {
             let id = item["name"].as_str().unwrap_or("");
             let about = item["about"].as_str().unwrap_or("");
-            body.push_str(&format!("<li><a href=\"/people/{0}/j/{1}/\">{1}</a> {2} <small>by {0}</small></li>",
-                escape(name), escape(id), escape(about)));
+            body.push_str(&format!("<li><a href=\"{}/j/{1}/\">{1}</a> {2} <small>by {3}</small></li>",
+                escape(&person_path(name)), escape(id), escape(about), escape(name)));
         }
         body.push_str("</ul>");
     }
@@ -236,7 +238,7 @@ pub(crate) async fn serve_hosted(home: PathBuf, listener: tokio::net::TcpListene
         Ok(entries) => for entry in entries {
             let entry = entry?;
             let Some(name) = entry.file_name().to_str().map(String::from) else { continue };
-            if entry.file_type()?.is_dir() && store::valid_name(&name).is_ok() {
+            if entry.file_type()?.is_dir() && person_name(&name).is_ok() {
                 hosted.person(&name, true)?;
             }
         },
@@ -265,7 +267,7 @@ mod tests {
         assert!(key.starts_with("jk_") && key.len() > 40, "{key}");
         let file = std::fs::read_to_string(keys_path(dir.path())).unwrap();
         assert!(!file.contains(&key), "the key must not be stored in clear");
-        let records = list(dir.path()).unwrap();
+        let records = read_keys(dir.path()).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].name, "alice");
         assert_eq!(records[0].sha256, digest(&key));
