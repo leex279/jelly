@@ -20,9 +20,13 @@ verbs), **jelly page** (the internal jelly, id `surface`, that lays out the othe
   `EventSource`s: each one holds an HTTP connection, and a page with a few jellies
   hits the browser's six-per-host limit and stalls every request.
 - Comments (`comments`) and attention items live beside state, not in it. Undo does not touch them.
-- Kept versions (`kept`) live beside state like comments; undo and restore never
-  touch them. Restoring a version is a change on the undo path (a `revert` step
-  and event), never a rewind: nothing after the restored version is dropped.
+- A version is a saved full copy of view, verbs and state (`versions`), beside
+  state like comments; undo never touches one. A change alone never makes a
+  version: an agent saves one when work is finished (`jelly done NAME LABEL`), the
+  person saves one on the jelly page, and the daemon saves one before a change
+  replaces content the person used. Do not make every change a version.
+- Restoring a version is a change on the undo path (a `revert` step and event),
+  never a rewind, and it saves what the jelly showed first.
 - A jelly's id is `project:name`; the project is the part before the colon. Short
   names resolve in the CLI (current project) and the runtime (the view's project).
 - Assets live in `~/.jelly/assets/<id>/`, outside state and undo. On Windows the folder

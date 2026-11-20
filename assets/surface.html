@@ -133,28 +133,51 @@
     .fbar { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px 12px; }
     .factions { grid-column: 1 / -1; flex-wrap: wrap; gap: 8px; }
   }
-  .full iframe { flex: 1; min-height: 0; width: 100%; border: 0; background: var(--card); }
+  .fbody { position: relative; flex: 1; min-height: 0; display: flex; }
+  .full iframe { flex: 1; min-width: 0; min-height: 0; width: 100%; border: 0; background: var(--card); }
   .fbar .viewing { color: var(--accent-ink); font-weight: 600; }
   .btn.warm { background: var(--sun); border-color: var(--sun); color: var(--sun-ink); }
 
-  /* history: the versions of the open jelly, newest first */
-  .hist { flex-shrink: 0; max-height: 40vh; overflow-y: auto; background: var(--card); border-bottom: 1px solid var(--line); padding: 6px 16px 10px; }
+  /* history: the saved versions of the open jelly, newest first, in a sidebar beside it */
+  .hist { flex: none; width: 320px; display: flex; flex-direction: column; background: var(--card); border-left: 1px solid var(--line); animation: hist-in .16s ease-out; }
+  @keyframes hist-in { from { opacity: 0; transform: translateX(12px); } }
   .hist[hidden] { display: none; }
-  .hist .hh { display: flex; gap: 8px; align-items: baseline; color: var(--muted); font-size: 12px; padding: 4px 0 6px; }
-  .hist .hh b { color: var(--ink); font-size: 12.5px; }
-  .hrow { display: grid; grid-template-columns: 44px 72px minmax(60px, 100px) minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 4px 6px; border-radius: 8px; font-size: 12.5px; }
+  .hist .hh { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 8px 10px 16px; border-bottom: 1px solid var(--line); }
+  .hist .hh b { font-size: 13.5px; }
+  .hist .hh span { flex: 1; color: var(--muted); font-size: 12px; }
+  .hist .hnote { flex: none; margin: 0; padding: 8px 16px 9px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11.5px; }
+  /* room at the end: the attention button floats over the bottom right corner */
+  .hist .hlist { flex: 1; min-height: 0; overflow-y: auto; padding: 10px 8px 76px; }
+  /* one version: a dot on the rail, its name, who saved it and when, then what the person can do */
+  .hrow { position: relative; padding: 7px 8px 8px 30px; border-radius: 10px; }
+  .hrow::before { content: ""; position: absolute; left: 14px; top: 0; bottom: 0; width: 2px; background: var(--line); }
+  .hrow:first-child::before { top: 14px; }
+  .hrow:last-child::before { bottom: calc(100% - 14px); }
+  .hrow::after { content: ""; position: absolute; left: 10px; top: 11px; width: 10px; height: 10px; box-sizing: border-box; border-radius: 50%; background: var(--card); border: 2px solid var(--line-2); }
+  .hrow.named::after { background: var(--sun); border-color: var(--sun); }
+  .hrow.cur::after { background: var(--accent); border-color: var(--accent); }
+  .hrow.now::after { border-style: dashed; }
   .hrow:hover { background: var(--page); }
-  .hrow.cur { background: var(--brand-soft); }
-  .hrow.look { outline: 2px solid var(--accent); outline-offset: -2px; }
-  .hrow code { font: 12px ui-monospace, Menlo, monospace; }
-  .hrow .when, .hrow .who { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .hrow .what { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .hrow .what .star { color: var(--sun-ink); background: var(--sun-soft); border-radius: 999px; padding: 0 7px; margin-left: 6px; font-size: 11.5px; }
-  .hrow .hacts { display: flex; gap: 4px; }
+  .hrow.look { background: var(--brand-soft); }
+  .hrow .hline { display: flex; align-items: baseline; gap: 8px; }
+  .hrow code { flex: none; font: 600 12px ui-monospace, Menlo, monospace; }
+  .hrow .hwhat { flex: 1; min-width: 0; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hrow .hwhat i { font-weight: 400; color: var(--muted); }
+  .hrow .hnow { flex: none; font: 600 10.5px -apple-system, sans-serif; border-radius: 999px; padding: 1px 8px; background: var(--brand-soft); color: var(--brand-soft-ink); }
+  .hrow.look .hnow { background: var(--accent); color: var(--brand-ink); }
+  .hrow .hmeta { color: var(--muted); font-size: 12px; }
+  .hrow .hacts { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; margin: 4px 0 0 -8px; }
+  .hrow .hacts .btn { font-size: 12px; padding: 2px 8px; }
+  .hrow .hacts.plain { margin-left: 0; gap: 6px; }
+  .hrow .hacts span { font-size: 12px; }
+  .hrow .hkeep { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+  .hrow .hkeep input { flex: 1 1 100%; min-width: 0; font: inherit; font-size: 12.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line-2); border-radius: 8px; padding: 3px 8px; }
+  .hrow .hkeep input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   @media (max-width: 900px) {
-    .hrow { grid-template-columns: 40px minmax(0, 1fr) auto; }
-    .hrow .when, .hrow .who { display: none; }
+    /* no room beside the jelly: the sidebar lies over its right edge */
+    .hist { position: absolute; top: 0; right: 0; bottom: 0; width: min(320px, 88vw); box-shadow: -18px 0 36px -18px var(--shadow); }
   }
+  @media (prefers-reduced-motion: reduce) { .hist { animation: none; } }
 
   /* ---- brand and motion: calm base, jelly physics at key moments ---- */
   .logo { flex: none; transform-origin: 50% 90%; cursor: pointer; }
@@ -226,13 +249,19 @@
     <div class="factions">
       <button class="btn warm" id="frestore" hidden></button>
       <button class="btn" id="fcomment" title="Pin a comment to any part (c)">Comment</button>
-      <button class="btn quiet" id="fhist" title="Earlier versions: look at one, restore one, keep one">History</button>
+      <button class="btn quiet" id="fhist" title="Saved versions: look at one, bring one back, save one">History</button>
       <button class="btn quiet" id="fundo">Undo</button>
       <button class="btn quiet" id="fpin"></button>
       <button class="btn quiet" id="frm">Remove</button>
     </div>
   </div>
-  <div class="hist" id="hist" hidden></div>
+  <div class="fbody" id="fbody">
+    <aside class="hist" id="hist" aria-label="Saved versions of this jelly" hidden>
+      <div class="hh"><b>History</b><span id="hcount"></span><button class="btn quiet" id="hclose" title="Close history">Close</button></div>
+      <p class="hnote">A version is a saved copy of this jelly. An agent saves one when it finishes something, and one is saved before a change replaces what you used. Restore saves what is showing first.</p>
+      <div class="hlist" id="hlist"></div>
+    </aside>
+  </div>
 </section>
 <script>
   // The stream: every unpinned jelly in the order agents made them, each with
@@ -247,6 +276,7 @@
   const lastEvent = new Map(); // name -> {text, by, at}
   let sel = null, full = null, booted = false;
   let viewing = null, histOpen = false; // the version the full view shows read only, and whether its list is open
+  let naming = null, removing = null; // in the history sidebar: the version being named with the label typed so far, and the one about to be removed
   let archived = [], showArchived = false; // jellies hidden after a quiet week
   // /p/<project> is this same page showing one project's jellies; / shows all.
   const PROJECT = location.pathname.startsWith("/p/") ? decodeURIComponent(location.pathname.slice(3)) : null;
@@ -587,20 +617,21 @@
     const f = document.createElement("iframe");
     f.src = src;
     f.title = full;
-    $("full").appendChild(f);
+    $("fbody").prepend(f); // before the history sidebar, so the sidebar sits on the right
   }
   function renderFull() {
     const j = byName(full);
     if (!j) return closeFull();
     $("ftitle").textContent = j.about || j.name;
-    const look = viewing ? `<span class="viewing">viewing v${viewing} · read only</span>` : "";
-    $("fmeta").innerHTML = `<code>${esc(short(j.name))}</code><span>by ${esc(who(j.made_by))}</span><span>v${j.version}</span><span>${ago(j.updated_ms)}</span>${look}${flags(j)}`;
+    const look = viewing ? `<span class="viewing">viewing version ${viewing} · read only</span>` : "";
+    // Changes are counted apart from saved versions, which History numbers v1, v2, v3.
+    $("fmeta").innerHTML = `<code>${esc(short(j.name))}</code><span>by ${esc(who(j.made_by))}</span><span>${j.version} change${j.version === 1 ? "" : "s"}</span><span>${ago(j.updated_ms)}</span>${look}${flags(j)}`;
     $("fpin").textContent = j.pinned ? "Unpin" : "Pin";
     $("back").textContent = viewing ? "← Live" : "← Back";
     $("back").title = viewing ? "Back to the live jelly (Esc)" : "Back to the stream (Esc)";
     $("fcomment").disabled = $("fundo").disabled = !!viewing;
     $("frestore").hidden = !viewing;
-    if (viewing) $("frestore").textContent = `Restore v${viewing}`;
+    if (viewing) $("frestore").textContent = `Restore version ${viewing}`;
     $("fhist").classList.toggle("on", histOpen);
     $("hist").hidden = !histOpen;
     if (histOpen) renderHistory();
@@ -612,6 +643,7 @@
     full = null;
     viewing = null;
     histOpen = false;
+    naming = removing = null;
     $("full").hidden = true;
     $("hist").hidden = true;
     $("full").querySelector("iframe")?.remove();
@@ -619,52 +651,92 @@
     if (!fromAgent) writeFocus(null);
   }
 
-  // ---- history: the versions of the open jelly ---------------------------------
+  // ---- history: the saved versions of the open jelly ---------------------------
 
-  // Look switches the frame to the read-only version; Restore brings one back as
-  // a new change; Keep names one so the undo limits never drop it.
+  // A version is a full copy: an agent saved it when it finished something, the
+  // person saved it here, or the daemon saved it before a change replaced what
+  // the person used. Look switches the frame to one, read only; Restore brings
+  // it back as a new change, after saving what is showing.
   function lookAt(version) {
     viewing = version;
     showFrame(version ? `/j/${enc(full)}/v/${version}/` : `/j/${enc(full)}/`);
     setCommenting($("fcomment"), false);
     renderFull();
   }
-  function whatChanged(v) {
-    if (v.kind === "call") return `call ${v.verb}`;
-    if (v.kind === "set") return "set state";
-    if (v.kind === "revert") return `restored v${v.restored}`;
-    if (v.kind === "new") return "made";
-    return v.kind;
-  }
+  // A name to start from: the person edits a suggestion, never an empty field.
+  const suggest = (v) => v.label || `Version ${v.version}, ${new Date(v.at_ms).toLocaleDateString(undefined, { day: "numeric", month: "short" })}`;
   async function renderHistory() {
     const name = full;
     const r = await fetch(`/api/jellies/${enc(name)}/history`);
     if (!r.ok || name !== full || !histOpen) return;
     const list = await r.json();
+    const typed = $("hlist").querySelector(".hkeep input");
+    if (naming && typed) naming.label = typed.value;
+    const refocus = typed && document.activeElement === typed;
+    const has = (version) => list.some((v) => v.version === version);
+    if (naming && !has(naming.version)) naming = null;
+    if (removing && !has(removing)) removing = null;
+    if (naming && naming.label == null) naming.label = suggest(list.find((v) => v.version === naming.version));
     const rows = list.map((v) => {
-      if (v.version == null) return `<div class="hrow"><code>v?</code><span class="when">?</span><span class="who">?</span><span class="what">saved before history</span><span class="hacts"></span></div>`;
-      const star = v.kept ? `<span class="star">★ ${esc(v.kept)}</span>` : "";
-      const acts = [
-        v.current ? "" : `<button class="btn quiet" data-look="${v.version}">Look</button>`,
-        v.current ? "" : `<button class="btn quiet" data-restore-v="${v.version}">Restore</button>`,
-        `<button class="btn quiet" data-keep="${v.version}" data-who="${esc(who(v.by))}" data-at="${v.at_ms}">${v.kept ? "Rename" : "Keep"}</button>`,
-      ].join("");
-      return `<div class="hrow${v.current ? " cur" : ""}${v.version === viewing ? " look" : ""}"><code>v${v.version}</code><span class="when">${ago(v.at_ms)}</span><span class="who">${esc(who(v.by))}</span><span class="what">${esc(whatChanged(v))}${v.current ? " · current" : ""}${star}</span><span class="hacts">${acts}</span></div>`;
+      const tag = v.version === viewing ? `<span class="hnow">viewing</span>` : v.current ? `<span class="hnow">current</span>` : "";
+      const when = new Date(v.at_ms).toLocaleString();
+      const what = v.label ? esc(v.label) : `<i>${v.auto ? "Saved automatically" : "Unnamed"}</i>`;
+      const by = v.auto ? `before a change by ${esc(who(v.by))}` : `saved by ${esc(who(v.by))}`;
+      let below;
+      if (naming?.version === v.version) {
+        below = `<form class="hkeep" data-name-form="${v.version}"><input aria-label="Name for version ${v.version}" value="${esc(naming.label)}" maxlength="80"><button class="btn on">Save name</button><button class="btn quiet" type="button" data-name-cancel>Cancel</button></form>`;
+      } else if (removing === v.version) {
+        below = `<div class="hacts plain"><span>Remove this version for good?</span><button class="btn warm" data-remove-yes="${v.version}">Remove</button><button class="btn quiet" data-remove-no>Cancel</button></div>`;
+      } else {
+        below = `<div class="hacts">${[
+          v.version === viewing ? `<button class="btn quiet" data-look="0">Back to live</button>` : v.current ? "" : `<button class="btn quiet" data-look="${v.version}">Look</button>`,
+          v.current ? "" : `<button class="btn quiet" data-restore-v="${v.version}">Restore</button>`,
+          `<button class="btn quiet" data-name="${v.version}">${v.label ? "Rename" : "Name"}</button>`,
+          `<button class="btn quiet" data-remove="${v.version}">Remove</button>`,
+        ].join("")}</div>`;
+      }
+      const cls = `${v.current ? " cur" : ""}${v.label ? " named" : ""}${v.version === viewing ? " look" : ""}`;
+      return `<div class="hrow${cls}"><div class="hline"><code>v${v.version}</code><span class="hwhat" title="${esc(v.label)}">${what}</span>${tag}</div><div class="hmeta" title="${esc(when)}">${by} · ${ago(v.at_ms)}</div>${below}</div>`;
     });
-    $("hist").innerHTML = `<div class="hh"><b>Versions</b><span>newest first · Look shows one read only, Restore brings it back as a new change, Keep names it so it is never dropped</span></div>${rows.join("")}`;
+    // What the jelly shows now, when no version holds it yet: one click saves it.
+    const now = list.some((v) => v.current) ? "" : `<div class="hrow now"><div class="hline"><span class="hwhat">Now</span><span class="hnow">not saved</span></div><div class="hmeta">${list.length ? "changed since the last version" : "no version saved yet"}</div><div class="hacts"><button class="btn on" data-save>Save version</button>${viewing ? `<button class="btn quiet" data-look="0">Back to live</button>` : ""}</div></div>`;
+    $("hcount").textContent = list.length ? `${list.length} version${list.length === 1 ? "" : "s"}, newest first` : "no versions yet";
+    $("hlist").innerHTML = now + rows.join("");
+    const input = $("hlist").querySelector(".hkeep input");
+    if (input && (refocus || naming.fresh)) { input.focus(); if (naming.fresh) input.select(); naming.fresh = false; }
   }
-  $("fhist").onclick = () => { histOpen = !histOpen; renderFull(); };
+  $("fhist").onclick = () => { histOpen = !histOpen; naming = removing = null; renderFull(); };
+  $("hclose").onclick = () => { histOpen = false; naming = removing = null; renderFull(); };
   $("frestore").onclick = () => viewing && act(`/api/jellies/${enc(full)}/history/${viewing}/restore`, {});
-  $("hist").addEventListener("click", (e) => {
+  $("hlist").addEventListener("click", async (e) => {
     const b = e.target.closest("button");
     if (!b || !full) return;
-    if (b.dataset.look) return lookAt(+b.dataset.look);
-    if (b.dataset.restoreV) return act(`/api/jellies/${enc(full)}/history/${b.dataset.restoreV}/restore`, {});
-    if (b.dataset.keep) {
-      const when = new Date(+b.dataset.at).toLocaleString();
-      const label = prompt(`Name version ${b.dataset.keep}`, `v${b.dataset.keep} by ${b.dataset.who} · ${when}`);
-      if (label && label.trim()) act(`/api/jellies/${enc(full)}/history/${b.dataset.keep}/keep`, { label: label.trim() });
+    const d = b.dataset;
+    const versions = `/api/jellies/${enc(full)}/history`;
+    if (d.look) return lookAt(+d.look || null);
+    if (d.restoreV) return act(`${versions}/${d.restoreV}/restore`, {});
+    if ("save" in d) {
+      // Saved at once; the name is offered right after, filled in, and can be skipped.
+      const ev = await act(versions, {});
+      if (ev?.args && !ev.args.label) { naming = { version: ev.args.version, label: null, fresh: true }; removing = null; }
+      return renderHistory();
     }
+    if (d.name) { naming = { version: +d.name, label: null, fresh: true }; removing = null; return renderHistory(); }
+    if ("nameCancel" in d) { naming = null; return renderHistory(); }
+    if (d.remove) { removing = +d.remove; naming = null; return renderHistory(); }
+    if ("removeNo" in d) { removing = null; return renderHistory(); }
+    if (d.removeYes) { removing = null; return act(`${versions}/${d.removeYes}?by=person`, null, "DELETE"); }
+  });
+  $("hlist").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const version = e.target.dataset.nameForm;
+    const label = e.target.querySelector("input").value.trim();
+    naming = null;
+    if (label) act(`/api/jellies/${enc(full)}/history/${version}/label`, { label });
+    else renderHistory();
+  });
+  $("hlist").addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && e.target.closest(".hkeep")) { e.stopPropagation(); naming = null; renderHistory(); }
   });
 
   // ---- comments -------------------------------------------------------------
@@ -695,7 +767,8 @@
 
   async function act(path, body, method = "POST") {
     const r = await fetch(path, { method, headers: { "content-type": "application/json" }, body: body && JSON.stringify({ ...body, by: "person" }) });
-    if (!r.ok) alert((await r.json()).error);
+    if (!r.ok) return void alert((await r.json()).error);
+    return r.json().catch(() => null); // the event, for the caller that wants it
   }
   const pin = (name) => act(`/api/jellies/${enc(name)}/pin`, { pinned: !byName(name).pinned });
   const remove = (name) => { if (confirm(`Remove ${name} and its history?`)) act(`/api/jellies/${enc(name)}?by=person`, null, "DELETE"); };
@@ -748,8 +821,9 @@
     if (ev.kind === "comment") return "commented";
     if (ev.kind === "reply") return "replied on a comment";
     if (ev.kind === "reshape") return "reshaped it";
-    if (ev.kind === "revert") return `restored v${ev.args?.version}`;
-    if (ev.kind === "keep") return `kept v${ev.args?.version}`;
+    if (ev.kind === "revert") return `restored version ${ev.args?.version}`;
+    if (ev.kind === "save") return `saved version ${ev.args?.version}${ev.args?.label ? `: ${ev.args.label}` : ""}`;
+    if (ev.kind === "discard") return `removed version ${ev.args?.version}`;
     if (ev.kind === "working") return ev.args ? `started: ${ev.args}` : "finished";
     if (ev.kind === "attention") return `asked: ${ev.args?.title || ""}`;
     if (ev.kind === "answer") return "answered";
@@ -792,9 +866,10 @@
     if (ev.kind !== "remove") lastEvent.set(ev.jelly, { text: describe(ev), by: ev.by, at: ev.at_ms || Date.now() });
     const el = entries.get(ev.jelly);
     if (el) { el.classList.remove("pulse"); void el.offsetWidth; el.classList.add("pulse"); }
-    // A version view never reloads itself; once the jelly's view, verbs or state
-    // move on (a restore most of all), the page goes back to the live jelly.
-    if (ev.jelly === full && viewing && ["revert", "reshape", "undo", "call", "set", "new"].includes(ev.kind)) lookAt(null);
+    // A saved version stays what it is while the jelly moves on, so the person
+    // keeps looking at it. A restore goes back to the live jelly, and so does
+    // removing the version on screen.
+    if (ev.jelly === full && viewing && (ev.kind === "revert" || (ev.kind === "discard" && ev.args?.version === viewing))) lookAt(null);
     clearTimeout(pending);
     pending = setTimeout(refresh, 120); // one refresh per burst of changes
   });

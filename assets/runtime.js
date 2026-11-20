@@ -17,7 +17,7 @@
 // A reshape or an undo that changes the view reloads the page. State lives in
 // the daemon, so nothing is lost.
 //
-// An older version (/j/<name>/v/<n>/) boots read only: it never reloads, posts
+// A saved version (/j/<name>/v/<n>/) boots read only: it never reloads, posts
 // no snapshot, and every write rejects. Restore it to change it.
 (() => {
   const boot = window.__JELLY__;
@@ -813,8 +813,9 @@
     bar.className = "jf-version";
     bar.innerHTML = '<span></span><button class="jf-live">Back to live</button><button class="jf-restore"></button>';
     const who = readOnly.by === "person" ? "you" : readOnly.by;
-    bar.querySelector("span").textContent = `Version ${readOnly.version} of ${boot.name} · read only · ${who} · ${ago(readOnly.at_ms)}${readOnly.kept ? ` · "${readOnly.kept}"` : ""}`;
-    bar.querySelector(".jf-restore").textContent = `Restore v${readOnly.version}`;
+    const saved = readOnly.auto ? `saved before a change by ${who}` : `saved by ${who}`;
+    bar.querySelector("span").textContent = `Version ${readOnly.version}${readOnly.label ? ` "${readOnly.label}"` : ""} of ${boot.name} · read only · ${saved} ${ago(readOnly.at_ms)}`;
+    bar.querySelector(".jf-restore").textContent = `Restore version ${readOnly.version}`;
     const live = `/j/${enc(boot.name)}/`;
     bar.querySelector(".jf-live").onclick = () => { location.href = live; };
     bar.querySelector(".jf-restore").onclick = async () => {
