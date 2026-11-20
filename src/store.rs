@@ -24,6 +24,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// always be undone.
 const UNDO_DEPTH: usize = 100;
 const UNDO_SLACK: usize = 64 * 1024;
+/// How many of the versions the daemon saved on its own a jelly keeps. Versions
+/// an agent or the person saved stay until the person removes them.
+const AUTO_VERSIONS: usize = 20;
+/// A version's label is one short line.
+const LABEL_CHARS: usize = 120;
 /// Myers diffing is quadratic on unrelated text. Past this it settles for a
 /// coarser diff, which is still exact.
 const DIFF_DEADLINE: Duration = Duration::from_millis(50);
@@ -263,6 +268,46 @@ struct Step {
     view_rev: u64,
 }
 
+/// A version: a full copy of a jelly's view, verbs and state, saved when a piece
+/// of work is finished. An agent saves one with `jelly done NAME LABEL`, the
+/// person on the jelly page, and the daemon before a change replaces content
+/// the person used (`auto`). Beside state like comments: undo never touches it.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Saved {
+    /// 1, 2, 3 in the order saved. A removed version's number is not used again.
+    pub version: u64,
+    /// Empty until someone names it.
+    pub label: String,
+    pub by: String,
+    pub at_ms: u64,
+    /// Saved by the daemon. Only the newest `AUTO_VERSIONS` of these stay;
+    /// naming one keeps it.
+    #[serde(default)]
+    pub auto: bool,
+    pub view: String,
+    pub verbs: String,
+    pub state: Value,
+    pub view_rev: u64,
+}
+
+impl Saved {
+    fn holds(&self, j: &Jelly) -> bool {
+        self.view == j.view && self.verbs == j.verbs && self.state == j.state
+    }
+}
+
+/// One line of `jelly history`: a version without its content, and whether it
+/// is what the jelly shows now.
+#[derive(Serialize, Clone, Debug)]
+pub struct Version {
+    pub version: u64,
+    pub label: String,
+    pub by: String,
+    pub at_ms: u64,
+    pub auto: bool,
+    pub current: bool,
+}
+
 /// Replace `remove` lines of the pretty-printed state, starting at line `at`, with `lines`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct Hunk {
@@ -290,6 +335,60 @@ impl Step {
 struct Entry {
     jelly: Jelly,
     steps: Vec<Step>,
+    /// Saved versions, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    versions: Vec<Saved>,
+    /// The number of the last version saved, so a removed number is not used again.
+    #[serde(default)]
+    versions_made: u64,
+    /// The person used the jelly since the last version was saved: the next
+    /// change that replaces its content saves a version first.
+    #[serde(default)]
+    used: bool,
+}
+
+impl Entry {
+    fn new(jelly: Jelly) -> Entry {
+        Entry { jelly, steps: Vec::new(), versions: Vec::new(), versions_made: 0, used: false }
+    }
+
+    /// Saves what the jelly shows now as a version and returns its number. When
+    /// a version already holds exactly that, no second copy is made: saving by
+    /// hand keeps that one, and names it if it has no name yet.
+    fn save(&mut self, label: &str, by: &str, auto: bool) -> u64 {
+        self.used = false;
+        let j = &self.jelly;
+        if let Some(v) = self.versions.iter_mut().rev().find(|v| v.holds(j)) {
+            if !auto {
+                v.auto = false;
+                if v.label.is_empty() { v.label = label.into(); }
+            }
+            return v.version;
+        }
+        self.versions_made += 1;
+        self.versions.push(Saved {
+            version: self.versions_made, label: label.into(), by: by.into(), at_ms: now_ms(), auto,
+            view: j.view.clone(), verbs: j.verbs.clone(), state: j.state.clone(), view_rev: j.view_rev,
+        });
+        if self.versions.iter().filter(|v| v.auto).count() > AUTO_VERSIONS {
+            let oldest = self.versions.iter().position(|v| v.auto).expect("counted above");
+            self.versions.remove(oldest);
+        }
+        self.versions_made
+    }
+
+    /// The daemon's own save, before a change replaces the view, the verbs or
+    /// the whole state. Only when the person used the jelly since the last
+    /// version, so an agent's changes one after another save nothing. Returns
+    /// the number of the version it made.
+    fn save_if_used(&mut self, by: &str) -> Option<u64> {
+        if !self.used || self.jelly.name == PAGE {
+            return None;
+        }
+        let made = self.versions_made;
+        let version = self.save("", by, true);
+        (version > made).then_some(version)
+    }
 }
 
 /// Reads jellies saved when undo kept a full copy of view, verbs and state per change.
@@ -300,6 +399,12 @@ struct EntryOnDisk {
     undo: Vec<Snapshot>,
     #[serde(default)]
     steps: Vec<Step>,
+    #[serde(default)]
+    versions: Vec<Saved>,
+    #[serde(default)]
+    versions_made: u64,
+    #[serde(default)]
+    used: bool,
 }
 
 #[derive(Deserialize)]
@@ -313,10 +418,10 @@ struct Snapshot {
 impl From<EntryOnDisk> for Entry {
     fn from(d: EntryOnDisk) -> Self {
         if d.undo.is_empty() {
-            return Entry { jelly: d.jelly, steps: d.steps };
+            return Entry { jelly: d.jelly, steps: d.steps, versions: d.versions, versions_made: d.versions_made, used: d.used };
         }
         // Oldest first: each snapshot is what the change after it replaced.
-        let mut entry = Entry { jelly: d.jelly, steps: Vec::new() };
+        let mut entry = Entry::new(d.jelly);
         for (i, snap) in d.undo.iter().enumerate() {
             let (view, verbs, state) = match d.undo.get(i + 1) {
                 Some(next) => (&next.view, &next.verbs, &next.state),
@@ -440,12 +545,18 @@ pub enum EventKind {
     Answer,
     Withdraw,
     Set,
+    /// A saved version brought back as a new change.
+    Revert,
+    /// A version saved, or named.
+    Save,
+    /// A saved version removed.
+    Discard,
 }
 
 impl EventKind {
     /// Things the person did that an agent should hear about.
     pub fn is_for_agent(self) -> bool {
-        matches!(self, EventKind::Call | EventKind::Comment | EventKind::Reply | EventKind::Resolve | EventKind::Undo | EventKind::Answer)
+        matches!(self, EventKind::Call | EventKind::Comment | EventKind::Reply | EventKind::Resolve | EventKind::Undo | EventKind::Answer | EventKind::Revert)
     }
 }
 
@@ -465,6 +576,8 @@ impl Event {
         let a = self.args.clone().unwrap_or(Value::Null);
         let s = |v: &Value| v.as_str().unwrap_or("").to_string();
         let clip = |t: String| if t.chars().count() > 200 { format!("{}…", t.chars().take(200).collect::<String>()) } else { t };
+        // The version the daemon saved before this change replaced what the person used.
+        let held = |a: &Value| a["saved"].as_u64().map(|v| format!("; version {v} holds what it replaced")).unwrap_or_default();
         match self.kind {
             EventKind::Call => {
                 let via = self.source.as_ref().and_then(|x| x["text"].as_str()).filter(|t| !t.is_empty()).map(|t| format!(" (via {t:?})")).unwrap_or_default();
@@ -480,16 +593,19 @@ impl Event {
             EventKind::Reply => format!("replied on comment {}: {}", s(&a["id"]), clip(s(&a["text"]))),
             EventKind::Resolve => format!("resolved comment {}", s(&a)),
             EventKind::Undo => "undid the last state change".into(),
+            EventKind::Revert => format!("restored version {}{}", a["version"], held(&a)),
+            EventKind::Save => match s(&a["label"]).as_str() { "" => format!("saved version {}", a["version"]), l => format!("saved version {}: {l:?}", a["version"]) },
+            EventKind::Discard => format!("removed version {}", a["version"]),
             EventKind::Attention => format!("asked {:?}", s(&a["title"])),
             EventKind::Withdraw => format!("withdrew {}", s(&a)),
-            EventKind::Set => match s(&a["pointer"]).as_str() { "" => "set the whole state".into(), p => format!("set {p}") },
+            EventKind::Set => match s(&a["pointer"]).as_str() { "" => format!("set the whole state{}", held(&a)), p => format!("set {p}") },
             EventKind::Working => match a.as_str() { Some(w) => format!("started working: {w}"), None => "finished working".into() },
             EventKind::Note => format!("left a note: {}", clip(s(&a))),
             EventKind::Move => format!("moved here from {}", s(&a["from"])),
             EventKind::Pin => if a == Value::Bool(true) { "pinned it".into() } else { "unpinned it".into() },
             EventKind::Asset => format!("added {}", s(&a["file"])),
-            EventKind::New => "made it".into(),
-            EventKind::Reshape => "reshaped it".into(),
+            EventKind::New => format!("made it{}", held(&a)),
+            EventKind::Reshape => format!("reshaped it{}", held(&a)),
             EventKind::Remove => "removed it".into(),
             EventKind::Archive => "archived it".into(),
             EventKind::Restore => "restored it".into(),
@@ -648,8 +764,16 @@ impl Store {
             working: None,
             notes: Vec::new(),
         };
-        let previous_entry = self.jellies.insert(name.into(), Entry { jelly, steps: Vec::new() });
-        self.commit(name, EventKind::New, by, None, None, vec![String::new()], previous_entry)
+        // A replaced jelly keeps its versions, and what the person used of it becomes one.
+        let previous_entry = self.jellies.get(name).cloned();
+        let mut entry = Entry::new(jelly);
+        let mut saved = None;
+        if let Some(mut old) = previous_entry.clone() {
+            saved = old.save_if_used(by);
+            (entry.versions, entry.versions_made) = (old.versions, old.versions_made);
+        }
+        self.jellies.insert(name.into(), entry);
+        self.commit(name, EventKind::New, by, None, saved.map(|v| serde_json::json!({"saved": v})), vec![String::new()], previous_entry)
     }
 
     pub fn call(&mut self, name: &str, verb: &str, args: Value, by: &str) -> Result<Event, Error> {
@@ -684,14 +808,18 @@ impl Store {
         if let Some(a) = about {
             entry.jelly.about = a.trim().into();
         }
+        let mut saved = None;
         if view.is_some() || verbs_src.is_some() {
+            if view.as_ref().is_some_and(|v| *v != entry.jelly.view) || verbs_src.as_ref().is_some_and(|v| *v != entry.jelly.verbs) {
+                saved = entry.save_if_used(by);
+            }
             let j = &mut entry.jelly;
             let replaced = |old: &mut String, new: Option<String>| new.filter(|n| n != old).map(|n| std::mem::replace(old, n));
             let step = Step { view: replaced(&mut j.view, view), verbs: replaced(&mut j.verbs, verbs_src), ..Step::for_rev(j.view_rev) };
             j.view_rev += 1;
             push_step(entry, step);
         }
-        self.commit(name, EventKind::Reshape, by, None, None, Vec::new(), previous_entry)
+        self.commit(name, EventKind::Reshape, by, None, saved.map(|v| serde_json::json!({"saved": v})), Vec::new(), previous_entry)
     }
 
     /// Writes state directly, outside the verbs: an agent fixing its own
@@ -704,10 +832,97 @@ impl Store {
         set_at(&mut next, pointer, value).map_err(Error::Invalid)?;
         let mut changed = Vec::new();
         diff(&entry.jelly.state, &next, &mut String::new(), &mut changed);
+        let mut args = serde_json::json!({"pointer": pointer});
+        if pointer.is_empty() && !changed.is_empty() {
+            if let Some(v) = entry.save_if_used(by) { args["saved"] = v.into(); }
+        }
         let step = Step { state: state_step(&next, &entry.jelly.state), ..Step::for_rev(entry.jelly.view_rev) };
         entry.jelly.state = next;
         push_step(entry, step);
-        self.commit(name, EventKind::Set, by, None, Some(serde_json::json!({"pointer": pointer})), changed, previous_entry)
+        self.commit(name, EventKind::Set, by, None, Some(args), changed, previous_entry)
+    }
+
+    /// A jelly's saved versions, newest first.
+    pub fn versions(&self, name: &str) -> Result<Vec<Version>, Error> {
+        let entry = self.jellies.get(name).ok_or_else(|| Error::NotFound(name.into()))?;
+        Ok(entry.versions.iter().rev().map(|v| Version {
+            version: v.version, label: v.label.clone(), by: v.by.clone(), at_ms: v.at_ms, auto: v.auto, current: v.holds(&entry.jelly),
+        }).collect())
+    }
+
+    /// One saved version in full.
+    pub fn version(&self, name: &str, version: u64) -> Result<&Saved, Error> {
+        let entry = self.jellies.get(name).ok_or_else(|| Error::NotFound(name.into()))?;
+        entry.versions.iter().find(|v| v.version == version).ok_or_else(|| no_version(name, version))
+    }
+
+    /// Saves what the jelly shows now as a version: a piece of work is finished.
+    /// The label may be empty. When a version already holds this content, that
+    /// one is kept instead of a second copy.
+    pub fn save_version(&mut self, name: &str, label: &str, by: &str) -> Result<Event, Error> {
+        let label = valid_label(label)?;
+        let previous_entry = self.jellies.get(name).cloned();
+        let entry = self.entry(name)?;
+        let version = entry.save(label, by, false);
+        let label = entry.versions.iter().find(|v| v.version == version).map(|v| v.label.clone()).unwrap_or_default();
+        self.commit(name, EventKind::Save, by, None, Some(serde_json::json!({"version": version, "label": label})), Vec::new(), previous_entry)
+    }
+
+    /// Names a version, or renames it. A named version is never dropped as one
+    /// the daemon saved on its own would be.
+    pub fn label_version(&mut self, name: &str, version: u64, label: &str, by: &str) -> Result<Event, Error> {
+        let label = valid_label(label)?;
+        if label.is_empty() {
+            return Err(Error::Invalid("a version's name cannot be empty".into()));
+        }
+        let previous_entry = self.jellies.get(name).cloned();
+        let entry = self.entry(name)?;
+        let v = entry.versions.iter_mut().find(|v| v.version == version).ok_or_else(|| no_version(name, version))?;
+        v.label = label.into();
+        v.auto = false;
+        self.commit(name, EventKind::Save, by, None, Some(serde_json::json!({"version": version, "label": label})), Vec::new(), previous_entry)
+    }
+
+    pub fn remove_version(&mut self, name: &str, version: u64, by: &str) -> Result<Event, Error> {
+        let previous_entry = self.jellies.get(name).cloned();
+        let entry = self.entry(name)?;
+        let at = entry.versions.iter().position(|v| v.version == version).ok_or_else(|| no_version(name, version))?;
+        let label = entry.versions.remove(at).label;
+        self.commit(name, EventKind::Discard, by, None, Some(serde_json::json!({"version": version, "label": label})), Vec::new(), previous_entry)
+    }
+
+    /// Brings a saved version back as a new change: a step on the undo chain
+    /// with its own event. What the jelly showed is saved as a version first,
+    /// unless one already holds it, so a restore loses nothing. Comments,
+    /// attention, notes and the other versions stay as they are.
+    pub fn restore_version(&mut self, name: &str, version: u64, by: &str) -> Result<Event, Error> {
+        let previous_entry = self.jellies.get(name).cloned();
+        let entry = self.entry(name)?;
+        let saved = entry.versions.iter().find(|v| v.version == version).cloned().ok_or_else(|| no_version(name, version))?;
+        if saved.holds(&entry.jelly) {
+            return Err(Error::Invalid(format!("{name} already shows version {version}")));
+        }
+        verbs::check(&saved.verbs).map_err(|e| Error::Invalid(format!("the verbs of version {version} were rejected, jelly unchanged: {e}")))?;
+        let made = entry.versions_made;
+        let before = entry.save("", by, true);
+        let mut args = serde_json::json!({"version": version});
+        if before > made { args["saved"] = before.into(); }
+        let j = &mut entry.jelly;
+        let mut changed = Vec::new();
+        diff(&j.state, &saved.state, &mut String::new(), &mut changed);
+        let replaced = |old: &mut String, new: String| (new != *old).then(|| std::mem::replace(old, new));
+        let step = Step {
+            state: state_step(&saved.state, &j.state),
+            view: replaced(&mut j.view, saved.view),
+            verbs: replaced(&mut j.verbs, saved.verbs),
+            ..Step::for_rev(j.view_rev)
+        };
+        j.state = saved.state;
+        if step.view.is_some() || step.verbs.is_some() {
+            j.view_rev += 1;
+        }
+        push_step(entry, step);
+        self.commit(name, EventKind::Revert, by, None, Some(args), changed, previous_entry)
     }
 
     pub fn undo(&mut self, name: &str, by: &str) -> Result<Event, Error> {
@@ -1031,6 +1246,9 @@ impl Store {
         if kind != EventKind::Archive {
             entry.jelly.archived = false;
         }
+        if by == PERSON && kind.is_for_agent() {
+            entry.used = true;
+        }
         let bytes = serde_json::to_vec(entry).expect("a jelly serializes");
         let jelly = entry.jelly.clone();
         if let Err(error) = write_atomic(&self.path(name), &bytes) {
@@ -1281,6 +1499,18 @@ fn push_step(entry: &mut Entry, step: Step) {
         drop += 1;
     }
     steps.drain(..drop);
+}
+
+fn no_version(name: &str, version: u64) -> Error {
+    Error::Invalid(format!("{name} has no version {version}; jelly history {name} lists them"))
+}
+
+fn valid_label(label: &str) -> Result<&str, Error> {
+    let label = label.trim();
+    if label.chars().count() > LABEL_CHARS || label.contains('\n') {
+        return Err(Error::Invalid(format!("a version's name is one line of at most {LABEL_CHARS} characters")));
+    }
+    Ok(label)
 }
 
 fn undo_budget(state: &Value) -> usize {
@@ -2388,5 +2618,174 @@ mod tests {
         assert_eq!(s.get("j").unwrap().state, json!({"labels": {"a": "pass"}}));
         s.undo("j", "person").unwrap();
         assert_eq!(s.get("j").unwrap().state, json!({"labels": {}}), "undo history is saved too");
+    }
+
+    /// `v2 agent "grid" - current`: number, who saved it, label, automatic, shown now.
+    fn listed(s: &Store) -> Vec<String> {
+        s.versions("j").unwrap().iter().map(|v| format!("v{} {} {:?} {} {}", v.version, v.by, v.label, if v.auto { "auto" } else { "-" }, if v.current { "current" } else { "-" })).collect()
+    }
+
+    fn label(s: &mut Store, id: &str, by: &str) {
+        s.call("j", "label", json!({"id": id, "value": "x"}), by).unwrap();
+    }
+
+    #[test]
+    fn a_version_is_saved_when_asked_not_at_every_change() {
+        let (dir, mut s) = store();
+        s.create("j", "<p>one</p>".into(), VERBS.into(), json!({"labels": {}}), "agent", false, "", "").unwrap();
+        label(&mut s, "a", "agent");
+        s.reshape("j", Some("<p>two</p>".into()), None, None, "agent").unwrap();
+        s.set_state("j", "/labels/b", Some(json!("y")), "agent").unwrap();
+        assert!(listed(&s).is_empty(), "changes alone save no version");
+
+        let ev = s.save_version("j", "  grid layout ", "agent").unwrap();
+        assert_eq!((ev.kind, ev.args.clone().unwrap()), (EventKind::Save, json!({"version": 1, "label": "grid layout"})));
+        assert!(!ev.is_inbox_item(""));
+        assert_eq!(ev.describe(), "saved version 1: \"grid layout\"");
+        assert_eq!(listed(&s), ["v1 agent \"grid layout\" - current"]);
+        let v1 = s.version("j", 1).unwrap();
+        assert_eq!((v1.view.as_str(), v1.state.clone(), v1.view_rev), ("<p>two</p>", json!({"labels": {"a": "x", "b": "y"}}), 2));
+
+        // Saving the same content again makes no second copy and keeps the name it has.
+        let again = s.save_version("j", "another name", "person").unwrap();
+        assert_eq!(again.args.unwrap(), json!({"version": 1, "label": "grid layout"}));
+        assert_eq!(s.jellies["j"].versions.len(), 1);
+
+        label(&mut s, "c", "person");
+        assert_eq!(listed(&s), ["v1 agent \"grid layout\" - -"], "the jelly moved on from version 1");
+        s.save_version("j", "", "person").unwrap();
+        assert_eq!(listed(&s), ["v2 person \"\" - current", "v1 agent \"grid layout\" - -"]);
+
+        s.undo("j", "person").unwrap();
+        s.undo("j", "person").unwrap();
+        assert_eq!(listed(&s), ["v2 person \"\" - -", "v1 agent \"grid layout\" - -"], "undo leaves versions alone");
+        assert!(s.version("j", 3).unwrap_err().to_string().contains("jelly history j"));
+        assert!(s.versions("missing").is_err());
+        assert!(s.save_version("j", &"x".repeat(LABEL_CHARS + 1), "agent").is_err());
+        assert!(s.save_version("j", "two\nlines", "agent").is_err());
+
+        drop(s);
+        let s = Store::open(dir.path()).unwrap();
+        assert_eq!(listed(&s), ["v2 person \"\" - -", "v1 agent \"grid layout\" - -"], "versions are saved with the jelly");
+        assert_eq!(s.version("j", 1).unwrap().view, "<p>two</p>");
+    }
+
+    #[test]
+    fn content_the_person_used_is_saved_before_a_change_replaces_it() {
+        let (_d, mut s) = store();
+        s.create("j", "<p>one</p>".into(), VERBS.into(), json!({"labels": {}}), "agent", false, "", "").unwrap();
+        s.reshape("j", Some("<p>two</p>".into()), None, None, "agent").unwrap();
+        s.set_state("j", "", Some(json!({"labels": {"a": "x"}})), "agent").unwrap();
+        assert!(listed(&s).is_empty(), "an agent's changes one after another save nothing");
+
+        label(&mut s, "b", "person");
+        s.set_state("j", "/labels/c", Some(json!("z")), "agent").unwrap();
+        assert!(listed(&s).is_empty(), "a change to part of the state replaces nothing");
+        let ev = s.reshape("j", Some("<p>three</p>".into()), None, None, "agent").unwrap();
+        assert_eq!(ev.args.clone().unwrap(), json!({"saved": 1}));
+        assert_eq!(ev.describe(), "reshaped it; version 1 holds what it replaced");
+        assert_eq!(listed(&s), ["v1 agent \"\" auto -"]);
+        let v1 = s.version("j", 1).unwrap();
+        assert_eq!((v1.view.as_str(), v1.state.clone()), ("<p>two</p>", json!({"labels": {"a": "x", "b": "x", "c": "z"}})));
+
+        let ev = s.reshape("j", Some("<p>four</p>".into()), None, None, "agent").unwrap();
+        assert_eq!((ev.args, listed(&s).len()), (None, 1), "saved once; the agent's next change saves nothing");
+
+        s.comment("j", json!({"selector": "#a"}), "too small", "person").unwrap();
+        s.reshape("j", Some("<p>four</p>".into()), None, Some("same view".into()), "agent").unwrap();
+        assert_eq!(listed(&s).len(), 1, "a reshape that changes neither view nor verbs replaces nothing");
+        let ev = s.set_state("j", "", Some(json!({"labels": {}})), "agent").unwrap();
+        assert_eq!(ev.args.clone().unwrap(), json!({"pointer": "", "saved": 2}));
+        assert_eq!(s.version("j", 2).unwrap().view, "<p>four</p>");
+
+        // The same holds when the whole jelly is replaced: its versions stay.
+        label(&mut s, "d", "person");
+        let ev = s.create("j", "<p>new</p>".into(), VERBS.into(), json!({"labels": {}}), "agent", true, "", "").unwrap();
+        assert_eq!(ev.args.clone().unwrap(), json!({"saved": 3}));
+        assert_eq!(listed(&s), ["v3 agent \"\" auto -", "v2 agent \"\" auto -", "v1 agent \"\" auto -"]);
+        assert_eq!(s.version("j", 3).unwrap().state, json!({"labels": {"d": "x"}}));
+
+        // The jelly page is reshaped on upgrade and has no history panel of its own.
+        s.create(PAGE, "<p>page</p>".into(), VERBS.into(), json!({"labels": {}}), "jelly", false, "", "").unwrap();
+        s.call(PAGE, "label", json!({"id": "a", "value": "x"}), PERSON).unwrap();
+        s.reshape(PAGE, Some("<p>page 2</p>".into()), None, None, "agent").unwrap();
+        assert!(s.versions(PAGE).unwrap().is_empty());
+    }
+
+    #[test]
+    fn restoring_a_version_is_a_new_undoable_change_and_saves_what_it_replaces() {
+        let (_d, mut s) = store();
+        s.create("j", "<p>one</p>".into(), VERBS.into(), json!({"labels": {}}), "agent", false, "", "").unwrap();
+        label(&mut s, "a", "agent");
+        s.save_version("j", "first", "agent").unwrap();
+        s.reshape("j", Some("<p>two</p>".into()), None, None, "agent").unwrap();
+        s.set_state("j", "/labels/b", Some(json!("y")), "agent").unwrap();
+        s.comment("j", json!({"selector": "#a"}), "too small", "person").unwrap();
+        s.attend("j", json!({"title": "Which?"}), "agent").unwrap();
+        s.note("j", "for the next agent", "agent").unwrap();
+        let before = s.get("j").unwrap().clone();
+
+        let ev = s.restore_version("j", 1, "person").unwrap();
+        assert_eq!((ev.kind, ev.by.as_str(), ev.args.clone().unwrap()), (EventKind::Revert, "person", json!({"version": 1, "saved": 2})));
+        assert_eq!(ev.changed, ["/labels/b"]);
+        assert!(ev.is_inbox_item(""), "the agent hears that the person went back");
+        assert_eq!(ev.describe(), "restored version 1; version 2 holds what it replaced");
+        let j = s.get("j").unwrap();
+        assert_eq!((j.view.as_str(), j.state.clone()), ("<p>one</p>", json!({"labels": {"a": "x"}})));
+        assert_eq!(j.view_rev, before.view_rev + 1, "a restore across a reshape is a new view revision");
+        assert_eq!((j.comments.len(), j.attention.len(), j.notes.len()), (1, 1, 1), "comments, attention and notes stay");
+        assert_eq!(listed(&s), ["v2 person \"\" auto -", "v1 agent \"first\" - current"]);
+        assert_eq!(s.version("j", 2).unwrap().view, "<p>two</p>");
+
+        assert!(s.restore_version("j", 1, "person").unwrap_err().to_string().contains("already shows version 1"));
+        assert!(s.restore_version("j", 9, "person").is_err());
+        let version = s.get("j").unwrap().version;
+
+        s.undo("j", "person").unwrap();
+        let j = s.get("j").unwrap();
+        assert_eq!((j.view.as_str(), j.state.clone(), j.version), (before.view.as_str(), before.state.clone(), version + 1));
+        assert_eq!(listed(&s), ["v2 person \"\" auto current", "v1 agent \"first\" - -"], "undoing a restore leaves both versions");
+
+        // Going back and forth between saved versions makes no new copies.
+        let ev = s.restore_version("j", 1, "agent").unwrap();
+        assert_eq!(ev.args.unwrap(), json!({"version": 1}));
+        assert_eq!(s.jellies["j"].versions.len(), 2);
+    }
+
+    #[test]
+    fn automatic_versions_are_capped_and_named_ones_stay_until_removed() {
+        let (dir, mut s) = store();
+        s.create("j", "<p>0</p>".into(), VERBS.into(), json!({"labels": {}}), "agent", false, "", "").unwrap();
+        s.save_version("j", "the start", "agent").unwrap();
+        for i in 1..=AUTO_VERSIONS + 5 {
+            label(&mut s, "a", "person");
+            s.reshape("j", Some(format!("<p>{i}</p>")), None, None, "agent").unwrap();
+            if i == 2 {
+                // Version 3 holds <p>1</p> with the person's label; naming it keeps it.
+                let ev = s.label_version("j", 3, "the one I liked", "person").unwrap();
+                assert_eq!((ev.kind, ev.args.unwrap()), (EventKind::Save, json!({"version": 3, "label": "the one I liked"})));
+            }
+        }
+        let all = s.versions("j").unwrap();
+        assert_eq!(all.iter().filter(|v| v.auto).count(), AUTO_VERSIONS, "only the newest automatic versions stay");
+        assert_eq!(all.iter().filter(|v| !v.auto).map(|v| (v.version, v.label.as_str())).collect::<Vec<_>>(), [(3, "the one I liked"), (1, "the start")]);
+        assert_eq!(all[0].version as usize, AUTO_VERSIONS + 5 + 1, "numbers count every version saved");
+        assert!(s.version("j", 2).is_err(), "the oldest automatic version was dropped");
+
+        assert!(s.label_version("j", 3, " ", "person").is_err());
+        assert!(s.label_version("j", 2, "gone", "person").is_err());
+        let ev = s.remove_version("j", 3, "person").unwrap();
+        assert_eq!((ev.kind, ev.args.clone().unwrap(), ev.describe()), (EventKind::Discard, json!({"version": 3, "label": "the one I liked"}), "removed version 3".to_string()));
+        assert!(s.remove_version("j", 3, "person").is_err());
+        let newest = s.versions("j").unwrap()[0].version;
+        s.remove_version("j", newest, "person").unwrap();
+        label(&mut s, "z", "agent");
+        let ev = s.save_version("j", "", "agent").unwrap();
+        assert_eq!(ev.args.unwrap()["version"], json!(newest + 1), "a removed number is not used again");
+
+        drop(s);
+        let s = Store::open(dir.path()).unwrap();
+        assert_eq!(s.versions("j").unwrap()[0].version, newest + 1);
+        assert_eq!(s.jellies["j"].versions_made, newest + 1);
     }
 }

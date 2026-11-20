@@ -158,6 +158,10 @@ fn router(app: Shared) -> Router {
         .route("/j/{name}", get(|Path(name): Path<String>| async move { Redirect::permanent(&format!("/j/{name}/")) }))
         .route("/j/{name}/", get(view))
         .route("/j/{name}/assets/{file}", get(asset))
+        // A saved version, read only, under its own prefix so `assets/<file>` still resolves.
+        .route("/j/{name}/v/{version}", get(|Path((name, version)): Path<(String, u64)>| async move { Redirect::permanent(&format!("/j/{name}/v/{version}/")) }))
+        .route("/j/{name}/v/{version}/", get(view_version))
+        .route("/j/{name}/v/{version}/assets/{file}", get(version_asset))
         // A project's page is the same page, showing only that project's jellies.
         .route("/p/{project}", get(|st: State<Shared>| async move { view(st, Path(PAGE.into())).await }))
         .route("/api/events", get(events))
@@ -173,6 +177,10 @@ fn router(app: Shared) -> Router {
         .route("/api/jellies/{name}/pin", post(pin))
         .route("/api/jellies/{name}/move", post(move_project))
         .route("/api/jellies/{name}/restore", post(restore))
+        .route("/api/jellies/{name}/history", get(history).post(save_version))
+        .route("/api/jellies/{name}/history/{version}", get(version).delete(remove_version))
+        .route("/api/jellies/{name}/history/{version}/restore", post(restore_version))
+        .route("/api/jellies/{name}/history/{version}/label", post(label_version))
         .route("/api/jellies/{name}/archive", post(archive))
         .route("/api/jellies/{name}/assets", get(list_assets))
         .route("/api/jellies/{name}/assets/{file}", post(put_asset).layer(DefaultBodyLimit::max(25 * 1024 * 1024)))
@@ -587,10 +595,26 @@ async fn view(State(app): State<Shared>, Path(name): Path<String>) -> Result<Htm
     let j = store.get(&name)?;
     let owner = app.snapshot_owner(&name, j.view_rev)?;
     let boot = json!({"snapshotOwner": owner, "name": j.name, "about": j.about, "version": j.version, "viewRev": j.view_rev, "state": j.state, "comments": j.comments, "attention": j.attention, "working": j.working});
+    Ok(Html(booted(&j.view, boot)))
+}
+
+/// A saved version of a jelly's view with that version's state booted and the
+/// runtime read only: no snapshots, no reloads, no verbs. Comments and attention
+/// live beside state, so none are shown.
+async fn view_version(State(app): State<Shared>, Path((name, version)): Path<(String, u64)>) -> Result<Html<String>, ApiError> {
+    let store = app.store.lock().expect("store lock");
+    let j = store.get(&name)?;
+    let v = store.version(&name, version)?;
+    let read_only = json!({"version": v.version, "label": v.label, "by": v.by, "at_ms": v.at_ms, "auto": v.auto});
+    let boot = json!({"name": j.name, "about": j.about, "version": j.version, "viewRev": v.view_rev, "state": v.state, "comments": [], "attention": [], "working": null, "readOnly": read_only});
+    Ok(Html(booted(&v.view, boot)))
+}
+
+fn booted(view: &str, boot: Value) -> String {
     // `</` cannot appear inside the script, or state text could close the tag.
     let boot = boot.to_string().replace("</", "<\\/");
     let inject = format!("<script>window.__JELLY__={boot};</script><script src=\"/runtime.js\"></script>");
-    Ok(Html(inject_head(&j.view, &inject)))
+    inject_head(view, &inject)
 }
 
 /// Puts `inject` first thing in `<head>`, so it runs before the view's scripts.
@@ -608,6 +632,38 @@ async fn archive(State(app): State<Shared>, Path(name): Path<String>, Json(r): J
 
 async fn restore(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<ByReq>) -> Result<Json<Event>, ApiError> {
     app.change(|s| s.set_archived(&name, false, &by(r.by)?))
+}
+
+async fn history(State(app): State<Shared>, Path(name): Path<String>) -> Result<Json<Vec<crate::store::Version>>, ApiError> {
+    Ok(Json(app.store.lock().expect("store lock").versions(&name)?))
+}
+
+async fn version(State(app): State<Shared>, Path((name, version)): Path<(String, u64)>) -> Result<Json<crate::store::Saved>, ApiError> {
+    Ok(Json(app.store.lock().expect("store lock").version(&name, version)?.clone()))
+}
+
+async fn restore_version(State(app): State<Shared>, Path((name, version)): Path<(String, u64)>, Json(r): Json<ByReq>) -> Result<Json<Event>, ApiError> {
+    app.change(|s| s.restore_version(&name, version, &by(r.by)?))
+}
+
+#[derive(Deserialize)]
+struct LabelReq {
+    #[serde(default)]
+    label: String,
+    by: Option<String>,
+}
+
+/// Saves what the jelly shows now as a version; the label may be left out.
+async fn save_version(State(app): State<Shared>, Path(name): Path<String>, Json(r): Json<LabelReq>) -> Result<Json<Event>, ApiError> {
+    app.change(|s| s.save_version(&name, &r.label, &by(r.by)?))
+}
+
+async fn label_version(State(app): State<Shared>, Path((name, version)): Path<(String, u64)>, Json(r): Json<LabelReq>) -> Result<Json<Event>, ApiError> {
+    app.change(|s| s.label_version(&name, version, &r.label, &by(r.by)?))
+}
+
+async fn remove_version(State(app): State<Shared>, Path((name, version)): Path<(String, u64)>, Query(q): Query<AssetQ>) -> Result<Json<Event>, ApiError> {
+    app.change(|s| s.remove_version(&name, version, &by(q.by)?))
 }
 
 #[derive(Deserialize)]
@@ -647,18 +703,27 @@ fn content_type(file: &str) -> &'static str {
 }
 
 async fn asset(State(app): State<Shared>, Path((name, file)): Path<(String, String)>) -> Response {
-    if crate::store::valid_file(&file).is_err() {
+    serve_asset(&app, &name, &file).await
+}
+
+/// Assets live outside versions, so a saved version sees the jelly's current files.
+async fn version_asset(State(app): State<Shared>, Path((name, _, file)): Path<(String, u64, String)>) -> Response {
+    serve_asset(&app, &name, &file).await
+}
+
+async fn serve_asset(app: &App, name: &str, file: &str) -> Response {
+    if crate::store::valid_file(file).is_err() {
         return StatusCode::NOT_FOUND.into_response();
     }
     let dir = {
         let store = app.store.lock().expect("store lock");
-        match store.get(&name) {
-            Ok(_) => store.asset_dir(&name),
+        match store.get(name) {
+            Ok(_) => store.asset_dir(name),
             Err(_) => return StatusCode::NOT_FOUND.into_response(),
         }
     };
-    match tokio::fs::read(dir.join(&file)).await {
-        Ok(bytes) => ([(header::CONTENT_TYPE, content_type(&file))], bytes).into_response(),
+    match tokio::fs::read(dir.join(file)).await {
+        Ok(bytes) => ([(header::CONTENT_TYPE, content_type(file))], bytes).into_response(),
         Err(_) => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -1165,6 +1230,8 @@ struct SeeQ {
     /// The whole page, not just the first screen.
     #[serde(default)]
     full: bool,
+    /// A saved version: what it is and where to look at it, without rendering.
+    version: Option<u64>,
 }
 
 /// Everything an agent needs to pick up a jelly, as plain text: what it is,
@@ -1183,6 +1250,10 @@ where
     F: FnMut(u32, u32, Option<std::path::PathBuf>) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
 {
+    if let Some(version) = q.version {
+        let store = app.store.lock().expect("store lock");
+        return Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], see_version(&store, &name, version)?).into_response());
+    }
     let (j, home, owner) = {
         let store = app.store.lock().expect("store lock");
         let j = store.get(&name)?;
@@ -1286,6 +1357,35 @@ where
         out.push('\n');
     }
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], out).into_response())
+}
+
+/// A saved version for an agent: its name, who saved it and when, its verbs,
+/// state shape, what differs from the current state, assets its view names
+/// that are gone, and the read-only URL. Nothing is rendered: the live jelly
+/// stays untouched.
+fn see_version(store: &Store, name: &str, version: u64) -> Result<String, Error> {
+    let v = store.version(name, version)?;
+    let j = store.get(name)?;
+    let mut out = String::new();
+    let line = |out: &mut String, s: String| { out.push_str(&s); out.push('\n'); };
+    let label = if v.label.is_empty() { String::new() } else { format!(" {:?}", v.label) };
+    let how = if v.auto { format!("saved automatically before a change by {}", v.by) } else { format!("saved by {}", v.by) };
+    line(&mut out, format!("{name} · version {}{label} · {how} {}", v.version, ago(v.at_ms)));
+    let verbs = crate::verbs::check(&v.verbs).unwrap_or_default();
+    line(&mut out, format!("verbs    {}", if verbs.is_empty() { "none (read-only)".to_string() } else { verbs.iter().map(|x| verb_sig(&v.verbs, x)).collect::<Vec<_>>().join(" · ") }));
+    line(&mut out, format!("state    {}", shape(&v.state)));
+    let mut changed = Vec::new();
+    crate::store::diff(&v.state, &j.state, &mut String::new(), &mut changed);
+    let changed = if changed.is_empty() { "nothing differs from the current state".to_string() } else { changed.join(" ") };
+    line(&mut out, format!("changed  {changed}{}{}", if v.view != j.view { " · the view differs" } else { "" }, if v.verbs != j.verbs { " · the verbs differ" } else { "" }));
+    let assets = store.assets(name);
+    let missing: Vec<&str> = v.view.match_indices("assets/").map(|(i, _)| {
+        let rest = &v.view[i + "assets/".len()..];
+        &rest[..rest.find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')).unwrap_or(rest.len())]
+    }).filter(|f| !f.is_empty() && !assets.iter().any(|a| a == f)).collect();
+    if !missing.is_empty() { line(&mut out, format!("assets   the view names assets that are gone: {}", missing.join(", "))); }
+    line(&mut out, format!("view     /j/{name}/v/{}/  (read only; `jelly restore {name} {}` brings it back)", v.version, v.version));
+    Ok(out)
 }
 
 fn clip(s: &str, n: usize) -> String {
@@ -2221,7 +2321,7 @@ mod tests {
 
     async fn seen(app: &Shared) -> String {
         let response = see(State(app.clone()), Path("test:x".into()),
-            Query(SeeQ { width: None, height: None, png: false, full: false }), axum::http::HeaderMap::new()).await.unwrap();
+            Query(SeeQ { width: None, height: None, png: false, full: false, version: None }), axum::http::HeaderMap::new()).await.unwrap();
         String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
     }
 
@@ -2269,7 +2369,7 @@ mod tests {
                 let (resume, resumed) = tokio::sync::oneshot::channel();
                 let mut rendezvous = Some((started, resumed));
                 let seeing = see_with_renderer(app.clone(), "test:x".into(),
-                    SeeQ { width: None, height: None, png, full: false },
+                    SeeQ { width: None, height: None, png, full: false, version: None },
                     move |_, _, path| {
                         assert_eq!(path.is_some(), png);
                         let (started, resumed) = rendezvous.take().expect("one render");
@@ -2313,7 +2413,7 @@ mod tests {
             std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o755)).unwrap();
             let browser = browser.to_str().unwrap().to_string();
             let response = see_with_renderer(app.clone(), "test:x".into(),
-                SeeQ { width: None, height: None, png: true, full: false },
+                SeeQ { width: None, height: None, png: true, full: false, version: None },
                 move |width, height, path| {
                     let browser = browser.clone();
                     async move {
@@ -2342,7 +2442,7 @@ mod tests {
             let posting_app = app.clone();
             let posting_owner = current.clone();
             let seeing = see_with_renderer(app.clone(), "test:x".into(),
-                SeeQ { width: None, height: None, png: false, full: false },
+                SeeQ { width: None, height: None, png: false, full: false, version: None },
                 move |_, _, path| {
                     assert!(path.is_none());
                     let app = posting_app.clone();
@@ -2604,7 +2704,7 @@ mod tests {
         let current = owner(&app, "test:x").await;
         post(&app, snapshot(&current, "PAGE", version)).await.unwrap();
         let see_x = || async {
-            let response = see_with_renderer(app.clone(), "test:x".into(), SeeQ { width: None, height: None, png: false, full: false },
+            let response = see_with_renderer(app.clone(), "test:x".into(), SeeQ { width: None, height: None, png: false, full: false, version: None },
                 |_, _, _| async { Err("no browser".to_string()) }).await.unwrap();
             String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap()
         };
@@ -2620,5 +2720,118 @@ mod tests {
         let out = see_x().await;
         assert!(header(&out).ends_with("last change just now"), "the agent's change was trimmed, so no author: {out}");
         assert!(out.contains(r#"person   just now label {"id":"mine"}"#), "{out}");
+    }
+
+    fn boot_of(html: &str) -> Value {
+        serde_json::from_str(html.split_once("window.__JELLY__=").unwrap().1.split_once(";</script>").unwrap().0).unwrap()
+    }
+
+    /// Version 1 "first draft" is PAGE {n:1}; the jelly then shows NEW {n:1}.
+    async fn one_version(app: &Shared) {
+        create_page(app, "PAGE", false).await;
+        let _ = app.change(|s| s.set_state("test:x", "/n", Some(json!(1)), "test")).unwrap();
+        let Json(ev) = save_version(State(app.clone()), Path("test:x".into()), Json(LabelReq { label: "first draft".into(), by: Some("agent".into()) })).await.unwrap();
+        assert_eq!((ev.kind, ev.args.unwrap()), (EventKind::Save, json!({"version": 1, "label": "first draft"})));
+        let _ = app.change(|s| s.reshape("test:x", Some("<h1>NEW</h1>".into()), None, None, "agent")).unwrap();
+    }
+
+    async fn listed(app: &Shared) -> Vec<(u64, String, String, bool, bool)> {
+        let list = serde_json::to_value(history(State(app.clone()), Path("test:x".into())).await.unwrap().0).unwrap();
+        list.as_array().unwrap().iter().map(|v| (v["version"].as_u64().unwrap(), v["label"].as_str().unwrap().to_string(), v["by"].as_str().unwrap().to_string(), v["auto"].as_bool().unwrap(), v["current"].as_bool().unwrap())).collect()
+    }
+
+    #[tokio::test]
+    async fn history_routes_save_list_look_restore_name_and_remove() {
+        let (_dir, app) = app();
+        one_version(&app).await;
+        assert_eq!(listed(&app).await, [(1, "first draft".into(), "agent".into(), false, false)]);
+        assert_eq!(history(State(app.clone()), Path("test:missing".into())).await.unwrap_err().into_response().status(), StatusCode::NOT_FOUND);
+
+        let v1 = serde_json::to_value(version(State(app.clone()), Path(("test:x".into(), 1))).await.unwrap().0).unwrap();
+        assert_eq!((v1["view"].as_str().unwrap(), v1["state"].clone(), v1["view_rev"].as_u64().unwrap(), v1["label"].as_str().unwrap()), ("<h1>PAGE</h1>", json!({"n": 1}), 1, "first draft"));
+        assert_eq!(version(State(app.clone()), Path(("test:x".into(), 9))).await.unwrap_err().into_response().status(), StatusCode::BAD_REQUEST);
+
+        let anonymous = restore_version(State(app.clone()), Path(("test:x".into(), 1)), Json(ByReq { by: None, pinned: None })).await.unwrap_err();
+        assert_eq!(anonymous.into_response().status(), StatusCode::BAD_REQUEST);
+        let Json(ev) = restore_version(State(app.clone()), Path(("test:x".into(), 1)), Json(ByReq { by: Some(PERSON.into()), pinned: None })).await.unwrap();
+        assert_eq!((ev.kind, ev.by.as_str(), ev.args.unwrap()), (EventKind::Revert, PERSON, json!({"version": 1, "saved": 2})));
+        let Html(html) = view(State(app.clone()), Path("test:x".into())).await.unwrap();
+        assert!(html.contains("<h1>PAGE</h1>") && boot_of(&html)["state"] == json!({"n": 1}), "the live view serves the restored version");
+        assert_eq!(listed(&app).await, [(2, "".into(), PERSON.into(), true, false), (1, "first draft".into(), "agent".into(), false, true)],
+            "what the restore replaced was saved first");
+
+        let Json(ev) = label_version(State(app.clone()), Path(("test:x".into(), 2)), Json(LabelReq { label: "the new look".into(), by: Some(PERSON.into()) })).await.unwrap();
+        assert_eq!((ev.kind, ev.args.unwrap()), (EventKind::Save, json!({"version": 2, "label": "the new look"})));
+        assert_eq!(listed(&app).await[0], (2, "the new look".into(), PERSON.into(), false, false), "a named version is no longer an automatic one");
+        let nameless = label_version(State(app.clone()), Path(("test:x".into(), 2)), Json(LabelReq { label: " ".into(), by: Some(PERSON.into()) })).await.unwrap_err();
+        assert_eq!(nameless.into_response().status(), StatusCode::BAD_REQUEST);
+
+        let Json(ev) = remove_version(State(app.clone()), Path(("test:x".into(), 2)), Query(AssetQ { by: Some(PERSON.into()) })).await.unwrap();
+        assert_eq!((ev.kind, ev.args.unwrap()["version"].as_u64()), (EventKind::Discard, Some(2)));
+        assert_eq!(listed(&app).await.len(), 1);
+        assert_eq!(remove_version(State(app.clone()), Path(("test:x".into(), 2)), Query(AssetQ { by: Some(PERSON.into()) })).await.unwrap_err().into_response().status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn version_views_boot_read_only_without_an_owner_and_serve_current_assets() {
+        let (_dir, app) = app();
+        one_version(&app).await;
+        let _ = put_asset(State(app.clone()), Path(("test:x".into(), "shot.png".into())), Query(AssetQ { by: Some("test".into()) }), Bytes::from_static(b"png")).await.unwrap();
+        let Html(html) = view_version(State(app.clone()), Path(("test:x".into(), 1))).await.unwrap();
+        assert!(html.contains("<h1>PAGE</h1>"), "{html}");
+        let boot = boot_of(&html);
+        assert!(boot.get("snapshotOwner").is_none(), "a version view never owns a snapshot");
+        assert_eq!((boot["state"].clone(), boot["viewRev"].clone(), boot["readOnly"].clone()["at_ms"].is_u64(), boot["readOnly"]["version"].clone(), boot["readOnly"]["by"].clone(), boot["readOnly"]["label"].clone()),
+            (json!({"n": 1}), json!(1), true, json!(1), json!("agent"), json!("first draft")));
+        assert_eq!(view_version(State(app.clone()), Path(("test:x".into(), 9))).await.unwrap_err().into_response().status(), StatusCode::BAD_REQUEST);
+        assert_eq!(view_version(State(app.clone()), Path(("test:missing".into(), 1))).await.unwrap_err().into_response().status(), StatusCode::NOT_FOUND);
+        assert!(app.screens.lock().unwrap().is_empty());
+
+        let served = version_asset(State(app.clone()), Path(("test:x".into(), 1, "shot.png".into()))).await;
+        assert_eq!(served.status(), StatusCode::OK);
+        assert_eq!(axum::body::to_bytes(served.into_body(), usize::MAX).await.unwrap(), Bytes::from_static(b"png"));
+        for (name, file) in [("test:x", "gone.png"), ("test:x", "../shot.png"), ("test:missing", "shot.png")] {
+            assert_eq!(version_asset(State(app.clone()), Path((name.into(), 1, file.into()))).await.status(), StatusCode::NOT_FOUND, "{name} {file}");
+        }
+
+        // The bundled runtime, booted read only: no snapshot, no reload, no writes.
+        let rt = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&rt).unwrap();
+        let eval = |script: &str| ctx.with(|ctx| {
+            ctx.eval::<(), _>(script).unwrap_or_else(|err| panic!("{err}: {:?}", ctx.catch()));
+        });
+        eval(include_str!("../tests/runtime-browser.js"));
+        eval(&format!("window.__JELLY__={boot};"));
+        eval(RUNTIME_JS);
+        eval("loaded();");
+        while rt.execute_pending_job().unwrap() {}
+        eval("if (requests.length !== 0) throw Error('a read-only view posted ' + JSON.stringify(requests));");
+        eval("message({jelly:'test:x', kind:'reshape', view_rev:99, version:9, state:{n:9}}); if (reloads !== 0) throw Error('a read-only view reloaded'); if (jelly.state.n !== 1) throw Error('a read-only view applied a live change');");
+        eval("jelly.call('x', {}).then(() => { throw Error('call accepted'); }, (e) => { globalThis.refused = e.message; });");
+        while rt.execute_pending_job().unwrap() {}
+        eval("if (!/version 1 of test:x, read only/.test(refused)) throw Error('wrong refusal: ' + refused); if (requests.length !== 0) throw Error('the refused call was sent');");
+    }
+
+    #[tokio::test]
+    async fn see_of_a_version_prints_who_saved_it_and_what_differs_without_rendering() {
+        let (_dir, app) = app();
+        let _ = app.change(|s| s.create("test:x", "<h1>PAGE</h1><img src=\"assets/gone.png\">".into(), "const verbs = { tick(s, { n }) { s.n = n; } };".into(), json!({}), "test", false, "", "")).unwrap();
+        let _ = app.change(|s| s.call("test:x", "tick", json!({"n": 1}), PERSON)).unwrap();
+        let _ = app.change(|s| s.reshape("test:x", Some("<h1>NEW</h1>".into()), None, None, "agent")).unwrap();
+        let _ = app.change(|s| s.set_state("test:x", "/n", Some(json!(2)), "agent")).unwrap();
+        let _ = app.change(|s| s.save_version("test:x", "new look", "agent")).unwrap();
+        let see_v = |version| see_with_renderer(app.clone(), "test:x".into(), SeeQ { width: None, height: None, png: false, full: false, version: Some(version) },
+            |_, _, _| async { panic!("a version is never rendered") });
+        let text = |response: Response| async { String::from_utf8(axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap().to_vec()).unwrap() };
+        let out = text(see_v(1).await.unwrap()).await;
+        assert!(out.lines().next().unwrap().starts_with("test:x · version 1 · saved automatically before a change by agent just now"), "{out}");
+        assert!(out.contains("verbs    tick({n})"), "{out}");
+        assert!(out.contains("changed  /n · the view differs"), "{out}");
+        assert!(out.contains("assets   the view names assets that are gone: gone.png"), "{out}");
+        assert!(out.contains("view     /j/test:x/v/1/  (read only; `jelly restore test:x 1` brings it back)"), "{out}");
+        let out = text(see_v(2).await.unwrap()).await;
+        assert!(out.lines().next().unwrap().starts_with("test:x · version 2 \"new look\" · saved by agent just now"), "{out}");
+        assert!(out.contains("changed  nothing differs from the current state"), "{out}");
+        assert_eq!(see_v(9).await.unwrap_err().into_response().status(), StatusCode::BAD_REQUEST);
     }
 }

@@ -26,6 +26,12 @@ prose, and whenever you need them to choose.
   waiting on them and what they did lately. `--png` when layout matters.
 - **Keep working on it together.** Reshape while it runs and state stays. Write
   state yourself with `jelly set`. Undo the last change. Notes for the next agent. One page per project. Share as one file.
+- **Go back.** A version is a saved copy of a jelly. Save one when a piece of work
+  is finished: `jelly done NAME "label"`. The daemon also saves one before a change
+  replaces what the person used. `jelly history NAME` lists them;
+  `jelly see NAME --version N` looks at one; `jelly restore NAME N` brings it back
+  as a new, undoable change. The person saves, names, looks at, restores and
+  removes versions in History on the jelly page.
 
 ```bash
 jelly ls                                         # list jellies; starts the daemon on first use
@@ -69,8 +75,9 @@ local endpoint, including `http://localhost:7878` and equivalent URL spellings;
 other `--url` / `JELLY_URL` targets must already be running.
 
 When upgrading, existing homes keep their stored jelly page, including any
-customizations. To install the bundled dock improvements and responsive stream and
-full-view headers, run this from the updated checkout against your running daemon:
+customizations. To install the bundled dock improvements, responsive stream and
+full-view headers and the History panel, run this from the updated checkout
+against your running daemon:
 
 ```bash
 jelly reshape surface --view assets/surface.html
@@ -143,6 +150,15 @@ jelly's next change. Converted history is exempt from the new byte budget until
 new history displaces it, within the same 100-step limit. An older binary cannot
 read a rewritten file: it skips that jelly with a `missing field` error. To go
 back to an older binary, keep a copy of `~/.jelly/jellies/` from before the upgrade.
+
+Saved versions live in the jelly's own file as full copies of view, verbs and
+state, apart from undo: undo never removes one, and the undo limits do not apply
+to them. A jelly keeps the newest 20 versions the daemon saved on its own; versions
+an agent or the person saved, and any version with a name, stay until the person
+removes them. Old files load as they are and start with no versions. An older
+binary still reads the new file but drops the versions at its next rewrite, and
+refuses to start on an `events.jsonl` that holds a `revert`, `save` or `discard`
+event. Keep a copy of `~/.jelly/` before going back.
 
 `jelly pull` gets asset names and bytes from the selected daemon, regardless of
 its home or the client's home. GET `/api/jellies/{name}/assets` returns a sorted

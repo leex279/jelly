@@ -46,6 +46,9 @@ jelly call plan add '{"title":"…"}'  # run a verb yourself; '@args.json' or - 
 jelly set plan --at /title '"Better title"'   # write state yourself, no verb needed
 jelly set plan --at /draft --rm      # remove a key; `jelly set plan @state.json` replaces it all
 jelly undo plan                      # undo the last change to view, verbs or state
+jelly history plan                   # the saved versions: name, who saved it, when
+jelly see plan --version 3           # what version 3 is and how it differs; its read-only URL
+jelly restore plan 3                 # bring version 3 back as a new change; what was showing is saved first
 jelly pin plan                       # keep it; unpinned jellies archive after a quiet week
 jelly rm plan
 ```
@@ -132,12 +135,21 @@ verbs as the job needs: `jelly new review --from /tmp/review`.
 
 ```bash
 jelly working plan "rebuilding the header"   # the person sees it and waits
-jelly done plan
+jelly done plan "new header"                 # finished: saves a version the person can go back to
 jelly see plan                 # check your work: the page as text, plus what waits on the person
 jelly see plan --width 390     # at phone width; add --png when layout matters
 jelly see plan --full          # screenshot the whole page, not just the first screen
 jelly focus plan               # open it full size on their screen
 ```
+
+A version is a saved copy of the jelly that the person can look at and bring back
+from History on the jelly page. Save one when a piece of work the person asked for
+is finished, with a label that says what it is: `jelly done plan "grid layout"`.
+Do not save one per change, and do not ask the person first: versions are for
+finished work, and they can remove one. Plain `jelly done plan` only says you
+stopped. As a safety net the daemon saves a version on its own before a reshape, a
+whole-state `jelly set` or a `--replace` replaces something the person used; the
+reply then says `version N holds what it replaced`.
 
 Always look before you show: run `jelly see`, and fix what is off before you focus
 the jelly or ask about it. `see` lists the errors your page threw (`error` lines)
@@ -315,7 +327,8 @@ A jelly is named `project:name`. The project is the git repo you run `jelly` in
 repo makes `archon:plan`, and `jelly call plan …` there finds it. Elsewhere use the
 full name. Inside a view, `jelly.read("plan")` means this project's plan. The
 person sees each project on its own page, `/p/<project>`. `jelly move NAME OTHER`
-moves a jelly; `jelly restore NAME` brings back an archived one.
+moves a jelly; `jelly restore NAME` brings back an archived one, and
+`jelly restore NAME VERSION` brings back a saved version of one.
 
 ## Files, assets, design, sharing
 
