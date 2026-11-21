@@ -583,8 +583,15 @@
     button.classList.toggle("on", on);
     button.textContent = on ? "Click a part · Esc" : "Comment";
   }
-  const frameOf = (name) => (full ? $("full").querySelector("iframe") : entries.get(name)?.querySelector("iframe"));
-  const buttonOf = (name) => (full ? $("fcomment") : entries.get(name)?.querySelector('[data-act="comment"]'));
+  const fullFrame = () => $("full").querySelector("iframe");
+  const streamFrame = (name) => entries.get(name)?.querySelector("iframe");
+  const streamButton = (name) => entries.get(name)?.querySelector('[data-act="comment"]');
+  const frameOf = (name) => (full ? fullFrame() : streamFrame(name));
+  const buttonOf = (name) => (full ? $("fcomment") : streamButton(name));
+  // A jelly's stream frame keeps focus while its full view is open, so a message may come from either.
+  const sentBy = (e, name) => [streamFrame(name), full === name ? fullFrame() : null].some((f) => f?.contentWindow === e.source);
+  // Each frame reports its own comment mode, so its button is the sender's, not the page mode's.
+  const buttonFor = (e, name) => (e.source === fullFrame()?.contentWindow ? $("fcomment") : streamButton(name));
   function toggleComment(name) {
     const f = frameOf(name), b = buttonOf(name);
     if (!f || !b) return;
@@ -596,9 +603,11 @@
   addEventListener("message", (e) => {
     if (e.origin !== location.origin) return;
     const d = e.data;
-    if (d?.type === "jelly:commenting") { const b = buttonOf(d.name); if (b) setCommenting(b, d.on); }
+    if (d?.type === "jelly:commenting" && sentBy(e, d.name)) { const b = buttonFor(e, d.name); if (b) setCommenting(b, d.on); }
     if (d?.type === "jelly:show" && byName(d.name)) openFull(d.name);
-    if (d?.type === "jelly:escape" && full) closeFull();
+    if (d?.type === "jelly:focus" && sentBy(e, d.name) && !full) select(d.name);
+    if (d?.type === "jelly:escape" && sentBy(e, d.name)) shortcut("Escape");
+    if (d?.type === "jelly:key" && sentBy(e, d.name)) shortcut(String(d.key));
   });
 
   // ---- actions --------------------------------------------------------------
@@ -636,19 +645,24 @@
     if (s.scrollTop < 200) $("newpill").hidden = true;
   });
 
-  addEventListener("keydown", (e) => {
-    if (e.target.closest("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.key === "Escape" && dockOpen) return setDock(false);
-    if (e.key === "a") return setDock(!dockOpen);
-    if (e.key === "Escape" && full) return closeFull();
-    if (e.key === "c") return toggleComment(full || sel);
+  // Keys typed on the page itself, and keys a focused jelly forwards as `jelly:key` or `jelly:escape`.
+  function shortcut(key, e) {
+    if (key.length === 1) key = key.toLowerCase();
+    if (key === "Escape" && dockOpen) return setDock(false);
+    if (key === "a") return setDock(!dockOpen);
+    if (key === "Escape" && full) return closeFull();
+    if (key === "c") return toggleComment(full || sel);
     if (full) return;
     const names = [...entries.keys()].sort((a, b) => byName(b).created_ms - byName(a).created_ms);
     const i = names.indexOf(sel);
-    if (e.key === "j" || e.key === "ArrowDown") { select(names[Math.min(names.length - 1, i + 1)], true); e.preventDefault(); }
-    if (e.key === "k" || e.key === "ArrowUp") { select(names[Math.max(0, i - 1)], true); e.preventDefault(); }
-    if (e.key === "Enter" && sel) openFull(sel);
-    if (e.key === "p") $("app").classList.toggle("nopinned");
+    if (key === "j" || key === "ArrowDown") { select(names[Math.min(names.length - 1, i + 1)], true); e?.preventDefault(); }
+    if (key === "k" || key === "ArrowUp") { select(names[Math.max(0, i - 1)], true); e?.preventDefault(); }
+    if (key === "Enter" && sel) openFull(sel);
+    if (key === "p") $("app").classList.toggle("nopinned");
+  }
+  addEventListener("keydown", (e) => {
+    if (e.target.closest("input, textarea") || e.metaKey || e.ctrlKey || e.altKey) return;
+    shortcut(e.key, e);
   });
 
   // ---- live -----------------------------------------------------------------

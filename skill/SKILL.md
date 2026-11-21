@@ -104,6 +104,16 @@ local button. A view with its own comment control can still omit the standalone
 button with `<meta name="jelly-comment" content="off">`; Option-click remains
 available. That metadata does not set placement.
 
+While a jelly has focus on the jelly page, keys typed in it also reach the page:
+unmodified `a`, `c`, `j`, `k`, `p`, the arrows, Enter and Escape drive the page's
+attention dock, comment mode, selection and full view, as the page's legend lists.
+Keys typed into an input, textarea, select or editable element stay in the view,
+and so does Enter on a focused button, link or summary. A view that handles one of
+these keys itself keeps it by calling `preventDefault()` in its `keydown` listener;
+the page ignores a key the view prevented. Escape follows the same rules once
+comment mode is off: while the view is in comment mode, or a comment pop is open,
+Escape typed anywhere in the view ends that and goes no further.
+
 ## Recipes
 
 Optional starting points for jellies that are easy to get wrong the first time.

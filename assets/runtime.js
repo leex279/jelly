@@ -895,12 +895,24 @@
   });
   subs.push(() => setTimeout(drawMarkers, 0));
   btn.onclick = (e) => { e.stopPropagation(); setMode(!commenting); };
+  // A click or Tab into a jelly never reaches the jelly page's click handler, so the jelly reports
+  // it and the page selects the jelly. A click into a jelly that already has focus fires no focus
+  // event, so the pointer reports too.
+  const reportFocus = () => { if (embedded) parent.postMessage({ type: "jelly:focus", name: boot.name }, location.origin); };
+  addEventListener("focus", reportFocus);
+  addEventListener("pointerdown", reportFocus);
+  // Keys typed while a jelly has focus reach the jelly page, which decides which are its shortcuts.
+  // Escape ends comment mode or closes an open comment pop first, and reaches the page only when
+  // there was neither; the page still listens for it as `jelly:escape`. A view keeps a key by
+  // calling preventDefault(); the check waits a tick because this listener runs before the view's.
   addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    // Esc inside a jelly closes the comment mode first, then reaches the jelly page.
-    const inPop = e.target.closest?.(".jf-pop");
-    if (embedded && !commenting && !inPop && !pop?.isConnected) parent.postMessage({ type: "jelly:escape", name: boot.name }, location.origin);
-    setMode(false);
+    const endsCommenting = e.key === "Escape" && (commenting || !!pop?.isConnected);
+    if (e.key === "Escape") { setMode(false); pop?.remove(); pop = null; }
+    if (!embedded || endsCommenting || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target.closest?.("input, textarea, select") || e.target.isContentEditable || pop?.isConnected) return;
+    if (e.key === "Enter" && e.target.closest?.("button, a[href], summary")) return;
+    const msg = e.key === "Escape" ? { type: "jelly:escape", name: boot.name } : { type: "jelly:key", name: boot.name, key: e.key };
+    setTimeout(() => { if (!e.defaultPrevented) parent.postMessage(msg, location.origin); }, 0);
   });
   addEventListener("mouseover", (e) => {
     if (!(commenting || e.altKey) || isOurs(e.target)) return;
